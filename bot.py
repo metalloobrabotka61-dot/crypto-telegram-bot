@@ -3,8 +3,9 @@ import time
 from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
-TELEGRAM_TOKEN = "8590220699:AAG6U7JoOH638P-LhA5Ow-Byr2cgh7thAAE"
-CHAT_ID = "694614387"
+import os
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
 # Настройки скальпинга
 CHECK_INTERVAL = 120            # Проверять каждые 120 секунд (2 минуты)
