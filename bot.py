@@ -7,14 +7,14 @@ from datetime import datetime
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
-# ========== ОСНОВНЫЕ ПАРАМЕТРЫ ==========
-CHECK_INTERVAL = 400            # 10 минут (увеличил для стабильности)
-TOP_VOLATILE_COINS = 50         # топ-20 альткоинов по объёму
-MIN_VOLUME_USDT = 2_000_000     # мин. объём $5M
-MIN_CHANGE_5M = 0.4             # мин. изменение цены за 5 мин (%)
+# ========== ОСНОВНЫЕ ПАРАМЕТРЫ (смягчённые для гарантии сигналов) ==========
+CHECK_INTERVAL = 600            # 10 минут (для стабильности)
+TOP_VOLATILE_COINS = 20         # топ-20 альткоинов
+MIN_VOLUME_USDT = 2_000_000     # мин. объём $2M (раньше было 5M)
+MIN_CHANGE_5M = 0.2             # мин. изменение за 5 минут 0.2% (раньше 0.4)
 LEVERAGE = 3
 
-# ========== НАСТРОЙКИ ДИНАМИЧЕСКИХ TP/SL ==========
+# ========== ДИНАМИЧЕСКИЕ TP/SL (без изменений) ==========
 ATR_PERIOD = 14
 ATR_STOP_MULT = 1.2
 ATR_TP_MULT_BASE = 2.0
@@ -25,8 +25,8 @@ USE_BB_LIMITS = True
 BB_PERIOD = 20
 BB_STD = 2
 
-# ========== НАСТРОЙКИ ИНДИКАТОРОВ ==========
-MIN_AGREEMENT = 4               # теперь 4 из 7 индикаторов
+# ========== ИНДИКАТОРЫ ==========
+MIN_AGREEMENT = 3               # 3 из 7 индикаторов (раньше 4)
 RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
@@ -36,22 +36,20 @@ EMA_SHORT = 9
 EMA_LONG = 21
 VOLUME_SURGE_FACTOR = 1.5
 ADX_PERIOD = 14
-# +++ ADDED SMA50
-SMA50_PERIOD = 50               # простая средняя за 50 свечей (5 мин = ~4 часа)
-# =========================================
+SMA50_PERIOD = 50
+# ==================================================
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
-    except:
-        pass
+    except Exception as e:
+        print("Ошибка отправки в Telegram:", e)
 
 def get_top_volume_coins(limit=50):
-    """Топ альткоинов по объёму с CoinGecko (исключая BTC, ETH и стейблкоины)"""
     url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page={limit}&page=1&sparkline=false"
     try:
-        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         data = response.json()
         exclude = ['BTC', 'ETH', 'USDT', 'USDC', 'DAI', 'BUSD', 'TUSD', 'USDP', 'FDUSD', 'PAXG', 'XAUT']
         top = []
@@ -69,10 +67,9 @@ def get_top_volume_coins(limit=50):
         return []
 
 def get_klines(symbol, interval='5m', limit=100):
-    """5-минутные свечи с Binance (только для существующих пар)"""
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         data = response.json()
         if not isinstance(data, list) or len(data) == 0:
             return [], [], [], []
@@ -89,7 +86,7 @@ def get_klines(symbol, interval='5m', limit=100):
                 continue
         return closes, highs, lows, volumes
     except Exception as e:
-        print(f"Ошибка получения свечей для {symbol}: {e}")
+        # Не печатаем ошибку для каждой монеты, чтобы не засорять консоль
         return [], [], [], []
 
 def calculate_rsi(closes, period=14):
@@ -116,7 +113,6 @@ def calculate_ema(closes, period):
     return ema
 
 def calculate_sma(closes, period):
-    """Простая скользящая средняя"""
     if len(closes) < period:
         return None
     return sum(closes[-period:]) / period
@@ -214,7 +210,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     ind = {}
     desc = {}
     
-    # 1. RSI
+    # RSI
     rsi = calculate_rsi(closes, RSI_PERIOD)
     if rsi:
         if rsi < RSI_OVERSOLD:
@@ -228,7 +224,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     else:
         desc['rsi'] = "RSI нет данных"
     
-    # 2. EMA
+    # EMA
     ema_s = calculate_ema(closes, EMA_SHORT)
     ema_l = calculate_ema(closes, EMA_LONG)
     if ema_s and ema_l:
@@ -241,7 +237,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     else:
         desc['ema'] = "EMA нет данных"
     
-    # 3. Боллинджер
+    # Боллинджер
     bb_up, bb_low, _ = calculate_bollinger_bands(closes, BB_PERIOD, BB_STD)
     if bb_up and bb_low:
         if curr_price < bb_low:
@@ -255,7 +251,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     else:
         desc['bb'] = "Боллинджер нет данных"
     
-    # 4. MACD
+    # MACD
     macd = calculate_macd_diff(closes, MACD_FAST, MACD_SLOW)
     if macd is not None:
         if macd > 0:
@@ -267,7 +263,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     else:
         desc['macd'] = "MACD нет данных"
     
-    # 5. Объём
+    # Объём
     avg_vol = sum(volumes[-20:-1])/19 if len(volumes)>=20 else None
     if avg_vol and volumes[-1] > avg_vol * VOLUME_SURGE_FACTOR:
         if len(closes)>=2 and closes[-1] > closes[-2]:
@@ -281,7 +277,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     else:
         desc['volume'] = "Объём в норме"
     
-    # 6. ADX
+    # ADX
     adx = calculate_adx(highs, lows, closes, ADX_PERIOD)
     if adx and adx > ADX_STRONG:
         if ind.get('ema') == 'long':
@@ -295,7 +291,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     else:
         desc['adx'] = f"ADX={adx if adx else '?'} (слабый тренд)"
     
-    # +++ ADDED SMA50
+    # SMA50
     sma50 = calculate_sma(closes, SMA50_PERIOD)
     if sma50 is not None:
         if curr_price > sma50:
@@ -307,7 +303,7 @@ def detect_signal_and_levels(closes, highs, lows, volumes):
     else:
         desc['sma50'] = "SMA50 нет данных"
     
-    # Подсчёт голосов (теперь 7 индикаторов)
+    # Подсчёт голосов (7 индикаторов)
     votes = []
     for k in ['rsi','ema','bb','macd','volume','adx','sma50']:
         if k in ind and ind[k] is not None:
@@ -349,15 +345,14 @@ def analyze_and_signal():
     sig_count = 0
     for coin in filtered:
         symbol = coin['symbol']
-        closes, highs, lows, volumes = get_klines(symbol, interval='5m', limit=110)  # чуть больше для SMA50
-        time.sleep(0.3)   # задержка для избежания блокировок
-        if len(closes) < 60:   # нужно минимум 50 для SMA плюс запас
+        closes, highs, lows, volumes = get_klines(symbol, interval='5m', limit=100)
+        time.sleep(0.3)   # задержка для API
+        if len(closes) < 60:
             continue
         
-        if len(closes) >= 2:
-            change_5m = (closes[-1] - closes[-2]) / closes[-2] * 100
-            if abs(change_5m) < MIN_CHANGE_5M:
-                continue
+        change_5m = (closes[-1] - closes[-2]) / closes[-2] * 100 if len(closes) >= 2 else 0
+        if abs(change_5m) < MIN_CHANGE_5M:
+            continue
         
         direction, det = detect_signal_and_levels(closes, highs, lows, volumes)
         if not direction:
@@ -387,7 +382,7 @@ def analyze_and_signal():
 • {det['descriptions'].get('macd', '—')}
 • {det['descriptions'].get('volume', '—')}
 • {det['descriptions'].get('adx', '—')}
-• {det['descriptions'].get('sma50', '—')}    # +++ новый индикатор
+• {det['descriptions'].get('sma50', '—')}
 
 🧮 <b>Расчёт TP/SL:</b> {det['tp_sl_explanation']}
 
@@ -412,7 +407,7 @@ def analyze_and_signal():
 • {det['descriptions'].get('macd', '—')}
 • {det['descriptions'].get('volume', '—')}
 • {det['descriptions'].get('adx', '—')}
-• {det['descriptions'].get('sma50', '—')}    # +++ новый индикатор
+• {det['descriptions'].get('sma50', '—')}
 
 🧮 <b>Расчёт TP/SL:</b> {det['tp_sl_explanation']}
 
@@ -425,10 +420,15 @@ def analyze_and_signal():
     
     if sig_count == 0:
         print(f"{datetime.now()} - Сигналов нет (требуется {MIN_AGREEMENT}/7 согласия).")
+        # Раз в час шлём "бот жив" (опционально)
+        if datetime.now().minute < 1:
+            send_telegram("🟢 Крипто-бот работает, но сигналов пока нет.")
 
-# ========== ЗАПУСК ==========
-print("Бот для альткоинов с 7 индикаторами (RSI, EMA, Боллинджер, MACD, объём, ADX, SMA50) запущен.")
+# ========== ЗАПУСК С ТЕСТОВЫМ СООБЩЕНИЕМ ==========
+send_telegram("🚀 Бот запущен и начинает анализ альткоинов (настройки: 3 из 7 индикаторов, мин. движение 0.2%)")
+print("Бот с 7 индикаторами (RSI, EMA, Боллинджер, MACD, объём, ADX, SMA50) запущен.")
 print(f"Проверка каждые {CHECK_INTERVAL//60} мин. Минимум согласия: {MIN_AGREEMENT}/7")
+
 while True:
     try:
         analyze_and_signal()
