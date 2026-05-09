@@ -8,50 +8,35 @@ TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
 # ========== ОСНОВНЫЕ ПАРАМЕТРЫ ==========
-CHECK_INTERVAL = 300            # 5 минут между проверками (можно 300 = 5 мин)
-TOP_VOLATILE_COINS = 20         # анализировать топ-20 волатильных монет
-MIN_VOLUME_USDT = 5_000_000     # минимальный 24h объём $5M
+CHECK_INTERVAL = 300            # 5 минут между проверками
+TOP_VOLATILE_COINS = 20         # топ-20 волатильных монет
+MIN_VOLUME_USDT = 5_000_000     # мин. объём $5M
 MIN_CHANGE_5M = 0.4             # мин. изменение цены за 5 мин (%)
-LEVERAGE = 3                    # плечо (общее для long/short)
-TAKE_PROFIT_PERCENT = 0.8       # тейк-профит (%)
-STOP_LOSS_PERCENT = 0.6         # стоп-лосс (%)
+LEVERAGE = 3                    # плечо (общее)
 
-# ========== НАСТРОЙКИ ИНДИКАТОРОВ ==========
-MIN_AGREEMENT = 4               # минимум индикаторов должны показывать одно направление (из 8)
-
-# RSI (14)
-RSI_PERIOD = 14
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
-
-# MACD (12, 26, 9)
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-
-# Скользящие средние (EMA 9 и EMA 21)
-EMA_SHORT = 9
-EMA_LONG = 21
-
-# Полосы Боллинджера (20 периодов, 2 отклонения)
+# ========== НАСТРОЙКИ ДИНАМИЧЕСКИХ TP/SL ==========
+ATR_PERIOD = 14                 # период ATR
+ATR_STOP_MULT = 1.2             # базовый множитель ATR для стоп-лосса
+ATR_TP_MULT_BASE = 2.0          # базовый множитель ATR для тейк-профита
+# Корректировка множителей в зависимости от ADX (силы тренда)
+ADX_STRONG = 25                 # если ADX > 25, тренд сильный
+STRONG_TREND_FACTOR = 1.3       # умножаем множители на 1.3 при сильном тренде
+WEAK_TREND_FACTOR = 0.7         # умножаем на 0.7 при слабом тренде (ADX < 20)
+# Использовать полосы Боллинджера для ограничения TP/SL (если цель выходит за полосу, корректируем)
+USE_BB_LIMITS = True
 BB_PERIOD = 20
 BB_STD = 2
+# ===============================================
 
-# Объём (всплеск относительно среднего за 20 периодов)
+# Настройки индикаторов (те же, что были)
+MIN_AGREEMENT = 4
+RSI_PERIOD = 14; RSI_OVERSOLD = 30; RSI_OVERBOUGHT = 70
+MACD_FAST = 12; MACD_SLOW = 26
+EMA_SHORT = 9; EMA_LONG = 21
 VOLUME_SURGE_FACTOR = 1.5
-
-# Stochastic RSI (14, 14, 1, 3)
-STOCH_RSI_PERIOD = 14
-STOCH_RSI_K = 14
-STOCH_RSI_D = 3
-
-# ADX (14 периодов) — сила тренда >25 считается сильным трендом
+STOCH_RSI_PERIOD = 14; STOCH_RSI_K = 14; STOCH_RSI_D = 3
 ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-
-# VWAP — внутридневной, используем последние 20 свечей для расчёта
 VWAP_PERIOD = 20
-# =========================================
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -61,168 +46,180 @@ def send_telegram(text):
         pass
 
 def get_top_volume_coins(limit=50):
-    url = "https://api.binance.com/api/v3/ticker/24hr"
+    """Получает топ монет по объёму с CoinGecko (работает без блокировок)"""
+    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page={limit}&page=1&sparkline=false"
     try:
-        data = requests.get(url).json()
-        usdt_pairs = [item for item in data if item['symbol'].endswith('USDT')]
-        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
+        response = requests.get(url)
+        data = response.json()
         top_coins = []
-        for pair in usdt_pairs[:limit]:
-            symbol = pair['symbol'].replace('USDT', '')
+        for coin in data:
             top_coins.append({
-                'symbol': symbol,
-                'volume': float(pair['quoteVolume']),
-                'change24h': float(pair['priceChangePercent'])
+                'symbol': coin['symbol'].upper(),
+                'volume': coin.get('total_volume', 0)
             })
         return top_coins
     except Exception as e:
-        print("Ошибка получения списка монет:", e)
+        print("Ошибка получения списка монет с CoinGecko:", e)
         return []
 
 def get_klines(symbol, interval='5m', limit=100):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
         data = requests.get(url).json()
-        closes = [float(candle[4]) for candle in data]
-        highs = [float(candle[2]) for candle in data]
-        lows = [float(candle[3]) for candle in data]
-        volumes = [float(candle[5]) for candle in data]
+        closes = [float(c[4]) for c in data]
+        highs = [float(c[2]) for c in data]
+        lows = [float(c[3]) for c in data]
+        volumes = [float(c[5]) for c in data]
         return closes, highs, lows, volumes
     except:
         return [], [], [], []
 
 def calculate_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return None
+    if len(closes) < period+1: return None
     gains, losses = [], []
     for i in range(1, len(closes)):
         diff = closes[i] - closes[i-1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(diff))
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return round(rsi, 2)
+        gains.append(diff if diff>0 else 0)
+        losses.append(-diff if diff<0 else 0)
+    avg_gain = sum(gains[-period:])/period
+    avg_loss = sum(losses[-period:])/period
+    if avg_loss == 0: return 100
+    return 100 - 100/(1+avg_gain/avg_loss)
 
 def calculate_ema(closes, period):
-    if len(closes) < period:
-        return None
-    multiplier = 2 / (period + 1)
+    if len(closes) < period: return None
+    mult = 2/(period+1)
     ema = closes[0]
-    for price in closes[1:]:
-        ema = (price - ema) * multiplier + ema
+    for p in closes[1:]: ema = (p-ema)*mult + ema
     return ema
 
-def calculate_bollinger_bands(closes, period=20, std_dev=2):
-    if len(closes) < period:
-        return None, None, None
-    last_prices = closes[-period:]
-    sma = sum(last_prices) / period
-    variance = sum((p - sma) ** 2 for p in last_prices) / period
-    std = math.sqrt(variance)
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper, lower, sma
+def calculate_bollinger_bands(closes, period=20, std=2):
+    if len(closes) < period: return None, None, None
+    last = closes[-period:]
+    sma = sum(last)/period
+    variance = sum((p-sma)**2 for p in last)/period
+    stdev = math.sqrt(variance)
+    return sma+std*stdev, sma-std*stdev, sma
 
-def calculate_macd_signal(closes, fast=12, slow=26):
-    """Простая разница EMA12 и EMA26, положительная -> бычий тренд"""
-    ema_fast = calculate_ema(closes, fast)
-    ema_slow = calculate_ema(closes, slow)
-    if ema_fast is None or ema_slow is None:
-        return None
-    return ema_fast - ema_slow
+def calculate_macd_diff(closes, fast=12, slow=26):
+    ema_f = calculate_ema(closes, fast)
+    ema_s = calculate_ema(closes, slow)
+    return ema_f - ema_s if ema_f and ema_s else None
 
 def calculate_stoch_rsi(closes, period=14, k_period=14, d_period=3):
-    """Возвращает текущее значение Stochastic RSI (%K) и %D"""
-    if len(closes) < period + k_period + d_period:
-        return None, None
-    # RSI массив
-    rsi_values = []
+    if len(closes) < period+k_period+d_period: return None, None
+    rsi_vals = []
     for i in range(period, len(closes)):
-        rsi = calculate_rsi(closes[i-period+1:i+1], period)
-        if rsi is not None:
-            rsi_values.append(rsi)
-    if len(rsi_values) < k_period:
-        return None, None
-    # Stochastic RSI = (текущий RSI - min(RSI за k_period)) / (max - min)
-    current_rsi = rsi_values[-1]
-    min_rsi = min(rsi_values[-k_period:])
-    max_rsi = max(rsi_values[-k_period:])
-    if max_rsi == min_rsi:
-        stoch_k = 50
+        r = calculate_rsi(closes[i-period+1:i+1], period)
+        if r: rsi_vals.append(r)
+    if len(rsi_vals) < k_period: return None, None
+    curr_rsi = rsi_vals[-1]
+    min_rsi = min(rsi_vals[-k_period:])
+    max_rsi = max(rsi_vals[-k_period:])
+    k = 50 if max_rsi==min_rsi else (curr_rsi-min_rsi)/(max_rsi-min_rsi)*100
+    # упрощённо %D = среднее за d_period
+    if len(rsi_vals) >= k_period+d_period:
+        d_vals = []
+        for j in range(len(rsi_vals)-d_period, len(rsi_vals)):
+            mn = min(rsi_vals[j-k_period+1:j+1])
+            mx = max(rsi_vals[j-k_period+1:j+1])
+            k_ = 50 if mx==mn else (rsi_vals[j]-mn)/(mx-mn)*100
+            d_vals.append(k_)
+        d = sum(d_vals)/d_period
     else:
-        stoch_k = (current_rsi - min_rsi) / (max_rsi - min_rsi) * 100
-    # %D — скользящая средняя от %K за d_period
-    if len(rsi_values) >= k_period + d_period:
-        k_values = []
-        for i in range(len(rsi_values)-d_period, len(rsi_values)):
-            mn = min(rsi_values[i-k_period+1:i+1])
-            mx = max(rsi_values[i-k_period+1:i+1])
-            if mx == mn:
-                k = 50
-            else:
-                k = (rsi_values[i] - mn) / (mx - mn) * 100
-            k_values.append(k)
-        stoch_d = sum(k_values) / d_period
-    else:
-        stoch_d = stoch_k
-    return round(stoch_k, 1), round(stoch_d, 1)
+        d = k
+    return round(k,1), round(d,1)
 
 def calculate_adx(highs, lows, closes, period=14):
-    """Индекс направленного движения ADX (сила тренда)"""
-    if len(closes) < period + 1:
-        return None
-    tr = []
-    plus_dm = []
-    minus_dm = []
+    if len(closes) < period+1: return None
+    tr, plus_dm, minus_dm = [], [], []
     for i in range(1, len(closes)):
-        high_diff = highs[i] - highs[i-1]
-        low_diff = lows[i-1] - lows[i]
-        true_range = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        tr.append(true_range)
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm.append(high_diff)
-        else:
-            plus_dm.append(0)
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm.append(low_diff)
-        else:
-            minus_dm.append(0)
-    if len(tr) < period:
-        return None
-    avg_tr = sum(tr[-period:]) / period
-    avg_plus = sum(plus_dm[-period:]) / period
-    avg_minus = sum(minus_dm[-period:]) / period
-    if avg_tr == 0:
-        return None
-    plus_di = (avg_plus / avg_tr) * 100
-    minus_di = (avg_minus / avg_tr) * 100
-    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) != 0 else 0
-    adx = dx  # упрощённо, в реальности сглаживают, но для сигнала достаточно
-    return round(adx, 1)
+        hl = highs[i]-lows[i]
+        hc = abs(highs[i]-closes[i-1])
+        lc = abs(lows[i]-closes[i-1])
+        tr.append(max(hl, hc, lc))
+        high_diff = highs[i]-highs[i-1]
+        low_diff = lows[i-1]-lows[i]
+        plus_dm.append(high_diff if high_diff>low_diff and high_diff>0 else 0)
+        minus_dm.append(low_diff if low_diff>high_diff and low_diff>0 else 0)
+    if len(tr) < period: return None
+    avg_tr = sum(tr[-period:])/period
+    avg_plus = sum(plus_dm[-period:])/period
+    avg_minus = sum(minus_dm[-period:])/period
+    if avg_tr == 0: return None
+    plus_di = avg_plus/avg_tr*100
+    minus_di = avg_minus/avg_tr*100
+    dx = abs(plus_di-minus_di)/(plus_di+minus_di)*100 if (plus_di+minus_di)!=0 else 0
+    return round(dx,1)
 
 def calculate_vwap(closes, volumes, period=20):
-    """Цена, взвешенная по объёму, за последние period свечей"""
-    if len(closes) < period or len(volumes) < period:
-        return None
-    total_value = 0
-    total_volume = 0
-    for i in range(-period, 0):
-        total_value += closes[i] * volumes[i]
-        total_volume += volumes[i]
-    if total_volume == 0:
-        return None
-    return total_value / total_volume
+    if len(closes) < period or len(volumes) < period: return None
+    val_sum = sum(closes[-i]*volumes[-i] for i in range(1, period+1))
+    vol_sum = sum(volumes[-i] for i in range(1, period+1))
+    return val_sum/vol_sum if vol_sum else None
 
-def detect_signal(closes, highs, lows, volumes):
-    """Возвращает 'long', 'short' или None, и словарь с показаниями индикаторов и описаниями"""
+def calculate_atr(highs, lows, closes, period=14):
+    """Возвращает ATR в процентах от текущей цены"""
+    if len(closes) < period+1:
+        return None
+    tr = []
+    for i in range(1, len(closes)):
+        hl = highs[i]-lows[i]
+        hc = abs(highs[i]-closes[i-1])
+        lc = abs(lows[i]-closes[i-1])
+        tr.append(max(hl, hc, lc))
+    if len(tr) < period:
+        return None
+    atr_abs = sum(tr[-period:]) / period
+    current_price = closes[-1]
+    if current_price == 0:
+        return None
+    return (atr_abs / current_price) * 100   # ATR в процентах
+
+def dynamic_tp_sl(current_price, atr_percent, adx, bb_upper, bb_lower, direction):
+    """
+    Рассчитывает TP и SL в процентах от цены входа.
+    direction: 'long' или 'short'
+    Возвращает (tp_percent, sl_percent, explanation)
+    """
+    # базовые множители
+    if adx is not None and adx > ADX_STRONG:
+        factor = STRONG_TREND_FACTOR
+        trend_desc = "сильный тренд"
+    elif adx is not None and adx < 20:
+        factor = WEAK_TREND_FACTOR
+        trend_desc = "слабый тренд (флет)"
+    else:
+        factor = 1.0
+        trend_desc = "умеренный тренд"
+    
+    sl_mult = ATR_STOP_MULT * factor
+    tp_mult = ATR_TP_MULT_BASE * factor
+    
+    sl_percent = atr_percent * sl_mult
+    tp_percent = atr_percent * tp_mult
+    
+    # Корректировка по полосам Боллинджера (если включено)
+    bb_correction = ""
+    if USE_BB_LIMITS and bb_upper and bb_lower:
+        if direction == 'long':
+            # Цель (TP) не должна быть выше верхней полосы (разумный предел)
+            max_tp_price = bb_upper
+            max_tp_percent = (max_tp_price / current_price - 1) * 100
+            if tp_percent > max_tp_percent and max_tp_percent > 0:
+                tp_percent = max_tp_percent * 0.9  # чуть ниже полосы
+                bb_correction = f" (скорректировано по верхней полосе Боллинджера {bb_upper:.2f})"
+        else:  # short
+            min_tp_price = bb_lower
+            min_tp_percent = (1 - min_tp_price / current_price) * 100
+            if tp_percent > min_tp_percent and min_tp_percent > 0:
+                tp_percent = min_tp_percent * 0.9
+                bb_correction = f" (скорректировано по нижней полосе Боллинджера {bb_lower:.2f})"
+    
+    explanation = f"ATR = {atr_percent:.2f}%, множители: SL={sl_mult:.1f}×, TP={tp_mult:.1f}×. Тренд: {trend_desc}.{bb_correction}"
+    return round(tp_percent, 2), round(sl_percent, 2), explanation
+
+def detect_signal_and_levels(closes, highs, lows, volumes):
     if len(closes) < max(RSI_PERIOD, EMA_LONG, BB_PERIOD, MACD_SLOW, ADX_PERIOD, 30):
         return None, {}
     
@@ -230,127 +227,126 @@ def detect_signal(closes, highs, lows, volumes):
     indicators = {}
     descriptions = {}
     
-    # 1. RSI
+    # RSI
     rsi = calculate_rsi(closes, RSI_PERIOD)
     rsi_signal = None
-    if rsi is not None:
+    if rsi:
         if rsi < RSI_OVERSOLD:
             rsi_signal = 'long'
-            desc = f"RSI = {rsi} (<{RSI_OVERSOLD}) – актив перепродан, ожидаем рост"
+            desc = f"RSI = {rsi} (<{RSI_OVERSOLD}) – перепроданность"
         elif rsi > RSI_OVERBOUGHT:
             rsi_signal = 'short'
-            desc = f"RSI = {rsi} (>{RSI_OVERBOUGHT}) – актив перекуплен, ожидаем коррекцию"
+            desc = f"RSI = {rsi} (>{RSI_OVERBOUGHT}) – перекупленность"
         else:
             desc = f"RSI = {rsi} (нейтрально)"
         indicators['rsi'] = rsi_signal
         descriptions['rsi'] = desc
     
-    # 2. EMA пересечение
+    # EMA
     ema_short = calculate_ema(closes, EMA_SHORT)
     ema_long = calculate_ema(closes, EMA_LONG)
     ema_signal = None
-    if ema_short is not None and ema_long is not None:
+    if ema_short and ema_long:
         if ema_short > ema_long:
             ema_signal = 'long'
-            desc = f"EMA{EMA_SHORT} ({ema_short:.2f}) > EMA{EMA_LONG} ({ema_long:.2f}) – восходящий тренд"
+            desc = f"EMA{EMA_SHORT} > EMA{EMA_LONG} – восходящий тренд"
         else:
             ema_signal = 'short'
-            desc = f"EMA{EMA_SHORT} ({ema_short:.2f}) < EMA{EMA_LONG} ({ema_long:.2f}) – нисходящий тренд"
+            desc = f"EMA{EMA_SHORT} < EMA{EMA_LONG} – нисходящий тренд"
         indicators['ema'] = ema_signal
         descriptions['ema'] = desc
     
-    # 3. Боллинджер
-    upper, lower, _ = calculate_bollinger_bands(closes, BB_PERIOD, BB_STD)
+    # Боллинджер
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(closes, BB_PERIOD, BB_STD)
     bb_signal = None
-    if upper and lower:
-        if current_price < lower:
+    if bb_upper and bb_lower:
+        if current_price < bb_lower:
             bb_signal = 'long'
-            desc = f"Цена ниже нижней полосы Боллинджера ({lower:.2f}) – вероятен отскок вверх"
-        elif current_price > upper:
+            desc = f"Цена ниже нижней полосы Боллинджера ({bb_lower:.2f}) – зона перепроданности"
+        elif current_price > bb_upper:
             bb_signal = 'short'
-            desc = f"Цена выше верхней полосы Боллинджера ({upper:.2f}) – вероятна коррекция вниз"
+            desc = f"Цена выше верхней полосы Боллинджера ({bb_upper:.2f}) – зона перекупленности"
         else:
-            desc = f"Цена внутри полос Боллинджера ({lower:.2f} – {upper:.2f}) – нейтрально"
+            desc = f"Цена внутри полос Боллинджера ({bb_lower:.2f}–{bb_upper:.2f})"
         indicators['bb'] = bb_signal
         descriptions['bb'] = desc
     
-    # 4. MACD (разница EMA12 и EMA26)
-    macd_diff = calculate_macd_signal(closes, MACD_FAST, MACD_SLOW)
+    # MACD
+    macd = calculate_macd_diff(closes, MACD_FAST, MACD_SLOW)
     macd_signal = None
-    if macd_diff is not None:
-        if macd_diff > 0:
+    if macd is not None:
+        if macd > 0:
             macd_signal = 'long'
-            desc = f"MACD положительный ({macd_diff:.2f}) – бычий импульс"
+            desc = f"MACD положительный ({macd:.2f}) – бычий импульс"
         else:
             macd_signal = 'short'
-            desc = f"MACD отрицательный ({macd_diff:.2f}) – медвежий импульс"
+            desc = f"MACD отрицательный ({macd:.2f}) – медвежий импульс"
         indicators['macd'] = macd_signal
         descriptions['macd'] = desc
     
-    # 5. Объём
-    avg_volume = sum(volumes[-20:-1]) / 19 if len(volumes) >= 20 else None
-    volume_signal = None
-    if avg_volume and volumes[-1] > avg_volume * VOLUME_SURGE_FACTOR:
-        if len(closes) >= 2 and closes[-1] > closes[-2]:
-            volume_signal = 'long'
-            desc = f"Всплеск объёма (x{volumes[-1]/avg_volume:.1f}) на растущей цене – подтверждение покупок"
-        elif len(closes) >= 2 and closes[-1] < closes[-2]:
-            volume_signal = 'short'
-            desc = f"Всплеск объёма (x{volumes[-1]/avg_volume:.1f}) на падающей цене – подтверждение продаж"
+    # Объём
+    avg_vol = sum(volumes[-20:-1])/19 if len(volumes)>=20 else None
+    vol_signal = None
+    if avg_vol and volumes[-1] > avg_vol * VOLUME_SURGE_FACTOR:
+        if len(closes)>=2 and closes[-1] > closes[-2]:
+            vol_signal = 'long'
+            desc = f"Всплеск объёма (x{volumes[-1]/avg_vol:.1f}) на росте"
+        elif len(closes)>=2 and closes[-1] < closes[-2]:
+            vol_signal = 'short'
+            desc = f"Всплеск объёма (x{volumes[-1]/avg_vol:.1f}) на падении"
         else:
-            desc = "Объём высокий, но цена не меняется"
+            desc = "Всплеск объёма, цена стабильна"
     else:
         desc = "Объём в норме"
-    indicators['volume'] = volume_signal
+    indicators['volume'] = vol_signal
     descriptions['volume'] = desc
     
-    # 6. Stochastic RSI
+    # StochRSI
     stoch_k, stoch_d = calculate_stoch_rsi(closes, STOCH_RSI_PERIOD, STOCH_RSI_K, STOCH_RSI_D)
     stoch_signal = None
-    if stoch_k is not None:
+    if stoch_k:
         if stoch_k < 20 and stoch_d < 20:
             stoch_signal = 'long'
-            desc = f"StochRSI %K={stoch_k} (<20) – зона перепроданности, ждём отскока"
+            desc = f"StochRSI %K={stoch_k} (<20) – перепроданность"
         elif stoch_k > 80 and stoch_d > 80:
             stoch_signal = 'short'
-            desc = f"StochRSI %K={stoch_k} (>80) – зона перекупленности, ждём падения"
+            desc = f"StochRSI %K={stoch_k} (>80) – перекупленность"
         else:
             desc = f"StochRSI %K={stoch_k} (нейтрально)"
         indicators['stoch_rsi'] = stoch_signal
         descriptions['stoch_rsi'] = desc
     
-    # 7. ADX (сила тренда)
+    # ADX
     adx = calculate_adx(highs, lows, closes, ADX_PERIOD)
     adx_signal = None
-    if adx is not None and adx > ADX_THRESHOLD:
-        # Если ADX сильный, смотрим направление EMA
+    if adx is not None and adx > ADX_STRONG:
         if ema_signal == 'long':
             adx_signal = 'long'
-            desc = f"ADX = {adx} (>{ADX_THRESHOLD}) – сильный тренд ВВЕРХ"
+            desc = f"ADX = {adx} (сильный тренд вверх)"
         elif ema_signal == 'short':
             adx_signal = 'short'
-            desc = f"ADX = {adx} (>{ADX_THRESHOLD}) – сильный тренд ВНИЗ"
+            desc = f"ADX = {adx} (сильный тренд вниз)"
         else:
-            desc = f"ADX = {adx} (сильный тренд, но направление не определено)"
+            desc = f"ADX = {adx} (сильный тренд, направление неясно)"
     else:
-        desc = f"ADX = {adx if adx else '?'} (слабый тренд, флет)"
+        desc = f"ADX = {adx if adx else '?'} (слабый тренд)"
     indicators['adx'] = adx_signal
     descriptions['adx'] = desc
     
-    # 8. VWAP
+    # VWAP
     vwap = calculate_vwap(closes, volumes, VWAP_PERIOD)
     vwap_signal = None
-    if vwap is not None:
+    if vwap:
         if current_price > vwap:
             vwap_signal = 'long'
             desc = f"Цена выше VWAP ({vwap:.2f}) – бычье внутридневное смещение"
         else:
             vwap_signal = 'short'
-            desc = f"Цена ниже VWAP ({vwap:.2f}) – медвежье внутридневное смещение"
+            desc = f"Цена ниже VWAP ({vwap:.2f}) – медвежье смещение"
         indicators['vwap'] = vwap_signal
         descriptions['vwap'] = desc
     
-    # Подсчёт голосов за long/short
+    # Подсчёт голосов
     all_signals = [indicators.get(k) for k in ['rsi','ema','bb','macd','volume','stoch_rsi','adx','vwap'] if indicators.get(k) is not None]
     long_votes = all_signals.count('long')
     short_votes = all_signals.count('short')
@@ -361,19 +357,33 @@ def detect_signal(closes, highs, lows, volumes):
     elif short_votes >= MIN_AGREEMENT:
         direction = 'short'
     
+    # Динамические TP/SL (нужны ATR, ADX, Боллинджер)
+    atr_percent = calculate_atr(highs, lows, closes, ATR_PERIOD)
+    if atr_percent is None:
+        atr_percent = 0.5  # значение по умолчанию, если не рассчиталось
+    
+    tp_percent, sl_percent, tp_sl_explanation = dynamic_tp_sl(
+        current_price, atr_percent, adx, bb_upper, bb_lower, direction
+    ) if direction else (None, None, "")
+    
     details = {
         'long_votes': long_votes,
         'short_votes': short_votes,
         'indicators': indicators,
         'descriptions': descriptions,
-        'current_price': current_price
+        'current_price': current_price,
+        'tp_percent': tp_percent,
+        'sl_percent': sl_percent,
+        'tp_sl_explanation': tp_sl_explanation,
+        'atr_percent': atr_percent,
+        'adx': adx
     }
     return direction, details
 
 def analyze_and_signal():
     all_coins = get_top_volume_coins(TOP_VOLATILE_COINS * 2)
     if not all_coins:
-        send_telegram("⚠️ Не удалось получить монеты с Binance")
+        send_telegram("⚠️ Ошибка Binance API")
         return
     
     filtered = [c for c in all_coins if c['volume'] >= MIN_VOLUME_USDT]
@@ -383,76 +393,80 @@ def analyze_and_signal():
         closes, highs, lows, volumes = get_klines(symbol, interval='5m', limit=100)
         if len(closes) < 50:
             continue
-        
-        # Проверка минимальной волатильности за 5 минут
         if len(closes) >= 2:
-            change_5m = (closes[-1] - closes[-2]) / closes[-2] * 100
+            change_5m = (closes[-1]-closes[-2])/closes[-2]*100
             if abs(change_5m) < MIN_CHANGE_5M:
                 continue
         
-        direction, details = detect_signal(closes, highs, lows, volumes)
+        direction, details = detect_signal_and_levels(closes, highs, lows, volumes)
         if not direction:
             continue
         
-        current_price = details['current_price']
+        price = details['current_price']
+        tp_pct = details['tp_percent']
+        sl_pct = details['sl_percent']
         if direction == 'long':
-            tp = current_price * (1 + TAKE_PROFIT_PERCENT / 100)
-            sl = current_price * (1 - STOP_LOSS_PERCENT / 100)
-            # Формируем описание индикаторов
-            ind_list = []
-            for k, desc in details['descriptions'].items():
-                ind_list.append(f"• {desc}")
-            ind_text = "\n".join(ind_list)
+            tp = price * (1 + tp_pct/100)
+            sl = price * (1 - sl_pct/100)
             message = f"""
 📢 <b>LONG СИГНАЛ ({symbol})</b> — {details['long_votes']}/8 индикаторов ЗА
 
-💰 <b>Вход:</b> ${current_price:.6f}
-🎯 <b>TP:</b> ${tp:.6f} (+{TAKE_PROFIT_PERCENT}%)
-🛑 <b>SL:</b> ${sl:.6f} (-{STOP_LOSS_PERCENT}%)
+💰 <b>Вход:</b> ${price:.6f}
+🎯 <b>Тейк-профит (динамический):</b> ${tp:.6f} (+{tp_pct}%)
+🛑 <b>Стоп-лосс (динамический):</b> ${sl:.6f} (-{sl_pct}%)
 ⚙️ <b>Плечо:</b> {LEVERAGE}x
 
 📊 <b>Индикаторы:</b>
-{ind_text}
+• {details['descriptions']['rsi']}
+• {details['descriptions']['ema']}
+• {details['descriptions']['bb']}
+• {details['descriptions']['macd']}
+• {details['descriptions']['volume']}
+• {details['descriptions']['stoch_rsi']}
+• {details['descriptions']['adx']}
+• {details['descriptions']['vwap']}
 
-💡 <b>Вывод:</b> Большинство индикаторов указывают на рост. Рекомендуется лонг.
+🧮 <b>Расчёт TP/SL:</b> {details['tp_sl_explanation']}
+
+💡 <b>Вывод:</b> Консенсус индикаторов — лонг. Уровни адаптированы к волатильности.
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-            send_telegram(message)
-            signals_count += 1
-            time.sleep(1)
-        
-        elif direction == 'short':
-            tp = current_price * (1 - TAKE_PROFIT_PERCENT / 100)
-            sl = current_price * (1 + STOP_LOSS_PERCENT / 100)
-            ind_list = []
-            for k, desc in details['descriptions'].items():
-                ind_list.append(f"• {desc}")
-            ind_text = "\n".join(ind_list)
+        else:  # short
+            tp = price * (1 - tp_pct/100)
+            sl = price * (1 + sl_pct/100)
             message = f"""
 📢 <b>SHORT СИГНАЛ ({symbol})</b> — {details['short_votes']}/8 индикаторов ЗА
 
-💰 <b>Вход:</b> ${current_price:.6f}
-🎯 <b>TP:</b> ${tp:.6f} (-{TAKE_PROFIT_PERCENT}%)
-🛑 <b>SL:</b> ${sl:.6f} (+{STOP_LOSS_PERCENT}%)
+💰 <b>Вход:</b> ${price:.6f}
+🎯 <b>Тейк-профит (динамический):</b> ${tp:.6f} (падение {tp_pct}%)
+🛑 <b>Стоп-лосс (динамический):</b> ${sl:.6f} (рост {sl_pct}%)
 ⚙️ <b>Плечо:</b> {LEVERAGE}x
 
 📊 <b>Индикаторы:</b>
-{ind_text}
+• {details['descriptions']['rsi']}
+• {details['descriptions']['ema']}
+• {details['descriptions']['bb']}
+• {details['descriptions']['macd']}
+• {details['descriptions']['volume']}
+• {details['descriptions']['stoch_rsi']}
+• {details['descriptions']['adx']}
+• {details['descriptions']['vwap']}
 
-💡 <b>Вывод:</b> Большинство индикаторов указывают на падение. Рекомендуется шорт.
+🧮 <b>Расчёт TP/SL:</b> {details['tp_sl_explanation']}
+
+💡 <b>Вывод:</b> Консенсус индикаторов — шорт.
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-            send_telegram(message)
-            signals_count += 1
-            time.sleep(1)
+        send_telegram(message)
+        signals_count += 1
+        time.sleep(1)
     
     if signals_count == 0:
         print(f"{datetime.now()} - Сигналов нет (консенсус {MIN_AGREEMENT} из 8 не достигнут).")
 
 # ========== ЗАПУСК ==========
-print("Мультииндикаторный бот (8 индикаторов) запущен. Проверка каждые 5 минут.")
-print(f"Параметры: MIN_AGREEMENT={MIN_AGREEMENT}, TP {TAKE_PROFIT_PERCENT}%, SL {STOP_LOSS_PERCENT}%, плечо {LEVERAGE}x")
-print(f"Индикаторы: RSI, EMA, Боллинджер, MACD, Объём, StochRSI, ADX, VWAP")
+print("Бот с динамическими TP/SL запущен. Проверка каждые 5 минут.")
+print(f"Параметры: ATR период {ATR_PERIOD}, множители SL={ATR_STOP_MULT}, TP={ATR_TP_MULT_BASE} (корректируются по ADX и Боллинджеру)")
 while True:
     try:
         analyze_and_signal()
