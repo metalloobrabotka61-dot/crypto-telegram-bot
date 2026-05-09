@@ -46,10 +46,10 @@ def send_telegram(text):
         pass
 
 def get_top_volume_coins(limit=50):
-    """Получает топ монет по объёму с CoinGecko (работает без блокировок)"""
+    """Получает топ монет по объёму с CoinGecko (работает всегда)"""
     url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page={limit}&page=1&sparkline=false"
     try:
-        response = requests.get(url)
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         data = response.json()
         top_coins = []
         for coin in data:
