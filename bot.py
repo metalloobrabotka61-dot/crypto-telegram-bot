@@ -9,57 +9,66 @@ TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
 # Настройки отбора монет
-MAX_PAIRS = 300                        # максимум монет (все USDT пары, 300 шт)
-MIN_24H_VOLUME_USDT = 20_000           # мин. объём $20k (отсекаем совсем мёртвые)
+MAX_PAIRS = 300
+MIN_24H_VOLUME_USDT = 0          # временно 0, чтобы точно появились монеты
 
-# Настройки анализа (ослаблены для появления сигналов)
-CHECK_INTERVAL = 1800                  # 30 минут (можно уменьшить)
-MIN_CHANGE_5M = 0.2                    # мин. изменение за 5 мин
+# Настройки анализа (ослаблены)
+CHECK_INTERVAL = 1800
+MIN_CHANGE_5M = 0.2
 LEVERAGE = 10
-MIN_AGREEMENT = 3                      # 3 из 7 индикаторов (было 5)
+MIN_AGREEMENT = 3
 
-# Индикаторы
 RSI_PERIOD = 14; RSI_OVERSOLD = 30; RSI_OVERBOUGHT = 70
 EMA_SHORT = 9; EMA_LONG = 21
 VOLUME_SURGE_FACTOR = 1.5
 ADX_PERIOD = 14; ADX_STRONG = 25
 SMA50_PERIOD = 50
 BB_PERIOD = 20; BB_STD = 2
-REQUIRE_FUNDING = False                # фандинг не используем
-MIN_VOL_RATIO = 0.8                    # объёмный всплеск (было 1.2, ослабили)
-RSI_LIMIT_LONG = 99                    # убрали ограничение RSI
+REQUIRE_FUNDING = False
+MIN_VOL_RATIO = 0.8
+RSI_LIMIT_LONG = 99
 RSI_LIMIT_SHORT = 1
 # =================================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ---------- ПОЛУЧЕНИЕ ВСЕХ USDT ПАР с Binance ----------
+# ---------- ПОЛУЧЕНИЕ ВСЕХ USDT ПАР (с диагностикой) ----------
 def get_all_usdt_pairs():
     url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
-        r = requests.get(url, timeout=15)
+        print("Запрос к Binance...")
+        r = requests.get(url, timeout=20)
+        print(f"Статус ответа: {r.status_code}")
+        if r.status_code != 200:
+            print(f"Ошибка HTTP {r.status_code}: {r.text[:200]}")
+            return []
         data = r.json()
         if not isinstance(data, list):
+            print(f"Ответ не список: {type(data)}")
             return []
         usdt_pairs = [item for item in data if item['symbol'].endswith('USDT')]
-        # Сортируем по объёму (quoteVolume) от большего к меньшему
+        print(f"Найдено USDT пар: {len(usdt_pairs)}")
         usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
         coins = []
         for pair in usdt_pairs[:MAX_PAIRS]:
             sym = pair['symbol'].replace('USDT', '')
-            # Исключаем стейблкоины и BTC/ETH (можно убрать, если хотите)
-            if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
+            # Исключаем стейблкоины (опционально)
+            if sym in ['USDC','DAI','BUSD','TUSD','FDUSD']:
                 continue
             vol = float(pair['quoteVolume'])
             if vol >= MIN_24H_VOLUME_USDT:
                 coins.append({'symbol': sym, 'volume': vol})
-        print(f"Получено {len(coins)} монет для анализа")
+        print(f"Отфильтровано монет: {len(coins)}")
+        if coins:
+            print("Примеры первых 5 монет:")
+            for c in coins[:5]:
+                print(f"  {c['symbol']} — объём {c['volume']:,.0f}")
         return coins
     except Exception as e:
-        print(f"Ошибка Binance: {e}")
+        print(f"Исключение в get_all_usdt_pairs: {e}")
         return []
 
-# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни) без изменений ----------
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни) БЕЗ ИЗМЕНЕНИЙ ----------
 def get_klines(symbol, interval='5m', limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
@@ -283,10 +292,8 @@ def analyze_coin(symbol):
     if not direction:
         return None
 
-    # Объёмный фильтр (ослаблен)
     if vol_ratio < MIN_VOL_RATIO:
         return None
-    # RSI фильтры отключены (лимиты 99 и 1)
     if direction == 'long' and rsi_5m is not None and rsi_5m > RSI_LIMIT_LONG:
         return None
     if direction == 'short' and rsi_5m is not None and rsi_5m < RSI_LIMIT_SHORT:
@@ -340,7 +347,7 @@ def main():
                 if signal:
                     bot.send_message(CHAT_ID, signal, parse_mode='HTML')
                     time.sleep(1)
-                time.sleep(0.5)  # пауза между запросами
+                time.sleep(0.5)
             print(f"{datetime.now()} - Цикл анализа завершён")
         except Exception as e:
             print(f"Ошибка в основном цикле: {e}")
