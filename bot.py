@@ -6,14 +6,14 @@ from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
-CHAT_ID = "694614387"                   # куда присылать сигналы
+CHAT_ID = "694614387"                    # куда присылать сигналы
 
-# Параметры отбора монет
-MAX_COINS = 200                       # максимум монет для анализа
-MAX_CAP_USD = 100_000_000             # максимальная капитализация ($100 млн) – только мелкие
-
-# Параметры анализа
+# Параметры отбора мелких монет
+MAX_COINS = 150                       # максимум монет для анализа
+MAX_CAP_USD = 100_000_000             # максимальная капитализация ($100 млн)
 CHECK_INTERVAL = 1800                 # 30 минут
+
+# Параметры анализа (не меняем)
 MIN_CHANGE_5M = 0.3
 LEVERAGE = 10
 MIN_AGREEMENT = 5                     # 5 из 7 индикаторов
@@ -25,7 +25,7 @@ VOLUME_SURGE_FACTOR = 1.5
 ADX_PERIOD = 14; ADX_STRONG = 25
 SMA50_PERIOD = 50
 BB_PERIOD = 20; BB_STD = 2
-REQUIRE_FUNDING = True
+REQUIRE_FUNDING = False               # фандинг отключён
 MIN_VOL_RATIO = 1.2
 RSI_LIMIT_LONG = 55
 RSI_LIMIT_SHORT = 45
@@ -33,49 +33,65 @@ RSI_LIMIT_SHORT = 45
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ---------- ФУНКЦИЯ ПОЛУЧЕНИЯ МЕЛКИХ МОНЕТ (CoinGecko) ----------
-def get_small_coins(max_cap_usd=MAX_CAP_USD, limit=MAX_COINS):
-    """Возвращает список мелких монет (капитализация < max_cap_usd), отсортированных по возрастанию капитализации"""
+# ---------- ФУНКЦИЯ ПОЛУЧЕНИЯ МЕЛКИХ МОНЕТ (с защитой от ошибок) ----------
+def get_small_coins():
     coins = []
     page = 1
     per_page = 100
-    while len(coins) < limit and page <= 3:  # максимум 3 страницы
+    max_retries = 3
+    
+    while len(coins) < MAX_COINS and page <= 3:
         url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_asc&per_page={per_page}&page={page}&sparkline=false"
-        try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-            data = r.json()
-            if not isinstance(data, list):
-                break
-            for coin in data:
-                cap = coin.get('market_cap', 0)
-                if cap >= max_cap_usd:
-                    # так как сортировка по возрастанию, дальше будут только крупнее – можно выходить
-                    break
-                symbol = coin['symbol'].upper()
-                # Исключаем стейблкоины и биткоин с эфиром (хотя они и так не попадут по капу)
-                if symbol in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
-                    continue
-                if 'stable' in coin['name'].lower():
-                    continue
-                # Проверяем, есть ли монета на Binance (USDT пара)
-                if not is_pair_on_binance(symbol):
-                    continue
-                coins.append({
-                    'symbol': symbol,
-                    'market_cap': cap,
-                    'volume': coin.get('total_volume', 0)
-                })
-                if len(coins) >= limit:
-                    break
+        data = None
+        for attempt in range(max_retries):
+            try:
+                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                if r.status_code == 200:
+                    # Проверяем, что ответ — это список (не текст ошибки)
+                    json_data = r.json()
+                    if isinstance(json_data, list):
+                        data = json_data
+                        break
+                    else:
+                        print(f"CoinGecko вернул не список (попытка {attempt+1})")
+                else:
+                    print(f"CoinGecko статус {r.status_code} (попытка {attempt+1})")
+                time.sleep(3)
+            except Exception as e:
+                print(f"Ошибка запроса CoinGecko: {e} (попытка {attempt+1})")
+                time.sleep(3)
+        if data is None:
+            print(f"Не удалось получить страницу {page}, перехожу дальше")
             page += 1
-            time.sleep(1.5)  # пауза между страницами
-        except Exception as e:
-            print(f"Ошибка получения мелких монет: {e}")
-            break
-    return coins[:limit]
+            continue
+        
+        for coin in data:
+            cap = coin.get('market_cap', 0)
+            if cap >= MAX_CAP_USD:
+                break
+            symbol = coin['symbol'].upper()
+            if symbol in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
+                continue
+            if 'stable' in coin.get('name', '').lower():
+                continue
+            # Проверяем, торгуется ли монета на Binance
+            if not is_pair_on_binance(symbol):
+                continue
+            coins.append({
+                'symbol': symbol,
+                'market_cap': cap,
+                'volume': coin.get('total_volume', 0)
+            })
+            if len(coins) >= MAX_COINS:
+                break
+        page += 1
+        time.sleep(2)  # пауза между страницами, чтобы не перегружать API
+    
+    print(f"Получено {len(coins)} мелких монет (кап < ${MAX_CAP_USD:,})")
+    return coins
 
 def is_pair_on_binance(symbol):
-    """Проверяет, существует ли USDT пара на Binance"""
+    """Проверяет, существует ли USDT пара на Binance (быстро, без загрузки всего ticker)"""
     url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
     try:
         r = requests.get(url, timeout=5)
@@ -83,7 +99,7 @@ def is_pair_on_binance(symbol):
     except:
         return False
 
-# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни) БЕЗ ИЗМЕНЕНИЙ ----------
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни) без изменений ----------
 def get_klines(symbol, interval='5m', limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
@@ -99,12 +115,8 @@ def get_klines(symbol, interval='5m', limit=200):
         return [], [], [], []
 
 def get_funding_rate(symbol):
-    url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}USDT"
-    try:
-        data = requests.get(url, timeout=10).json()
-        return float(data.get('lastFundingRate', 0)) * 100
-    except:
-        return None
+    # фандинг не используется, но оставим для совместимости
+    return None
 
 def calculate_rsi(closes, period=14):
     if len(closes) < period+1: return None
@@ -278,10 +290,9 @@ def analyze_coin(symbol):
     elif short_votes >= MIN_AGREEMENT: direction = 'short'
     if not direction: return None
 
-    funding = get_funding_rate(symbol)
-    if REQUIRE_FUNDING and funding is not None:
-        if direction == 'long' and funding >= 0: return None
-        if direction == 'short' and funding <= 0: return None
+    # Отключаем проверку фандинга
+    # funding = get_funding_rate(symbol)
+    # if REQUIRE_FUNDING and funding is not None: ...
     if vol_ratio < MIN_VOL_RATIO: return None
     if direction == 'long' and rsi_5m is not None and rsi_5m > RSI_LIMIT_LONG: return None
     if direction == 'short' and rsi_5m is not None and rsi_5m < RSI_LIMIT_SHORT: return None
@@ -292,7 +303,6 @@ def analyze_coin(symbol):
         current_price, supports, resistances, fibo, direction
     )
 
-    funding_str = f"{funding:.4f}%" if funding is not None else "нет данных"
     msg = f"""
 {'🟢 LONG' if direction=='long' else '🔴 SHORT'} СИГНАЛ ({symbol})
 
@@ -311,7 +321,6 @@ def analyze_coin(symbol):
 • {desc['adx']}
 • {desc['sma50']}
 
-📈 Фандинг: {funding_str}
 📊 Объём/средний: {vol_ratio:.1f}x
 📍 {level_exp}
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -328,10 +337,10 @@ def main():
                 print("Нет мелких монет, повтор через 60 сек")
                 time.sleep(60)
                 continue
-            print(f"Получено {len(coins)} мелких монет для анализа")
+            print(f"Начинаю анализ {len(coins)} монет...")
             for coin in coins:
                 symbol = coin['symbol']
-                print(f"Анализирую {symbol}, кап: ${coin['market_cap']:,}")
+                print(f"Анализирую {symbol} (кап: ${coin['market_cap']:,.0f})")
                 signal = analyze_coin(symbol)
                 if signal:
                     bot.send_message(CHAT_ID, signal, parse_mode='HTML')
