@@ -2,18 +2,18 @@ import asyncio
 import requests
 import time
 import math
+import threading
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
-# OWNER_CHAT_ID – сюда будут приходить сигналы (можно указать свой ID, можно оставить None)
-OWNER_CHAT_ID = "694614387"   # замените на свой числовой ID или оставьте пустым, если сигналы не нужны
+OWNER_CHAT_ID = "694614387"  # укажите ID или оставьте пустой, если не нужны сигналы
 
 bot_enabled = True
 
-# Параметры анализа
+# Параметры анализа (оставлены без изменений)
 CHECK_INTERVAL = 900
 TOP_COINS = 20
 MIN_VOLUME_USDT = 7_500_000
@@ -101,7 +101,7 @@ def get_funding_rate(symbol):
     except:
         return None
 
-# ---------- ИНДИКАТОРЫ ----------
+# ---------- ИНДИКАТОРЫ (полностью аналогичны предыдущей версии) ----------
 def calculate_rsi(closes, period=14):
     if len(closes) < period+1: return None
     gains, losses = [], []
@@ -314,23 +314,37 @@ def analyze_coin(symbol):
 """
     return msg
 
-# ---------- ФОНОВЫЙ АНАЛИЗ ----------
-async def analysis_loop(app: Application):
+# ---------- ФОНОВЫЙ АНАЛИЗ В ОТДЕЛЬНОМ ПОТОКЕ ----------
+def background_analysis():
     global bot_enabled
     while True:
         if bot_enabled and OWNER_CHAT_ID:
-            coins = get_top_coins()
-            for coin in coins:
-                try:
-                    signal = analyze_coin(coin['symbol'])
-                    if signal:
-                        await app.bot.send_message(chat_id=OWNER_CHAT_ID, text=signal, parse_mode='HTML')
-                        await asyncio.sleep(1)
-                except Exception as e:
-                    print(f"Ошибка {coin['symbol']}: {e}")
-                await asyncio.sleep(0.5)
-            print(f"{datetime.now()} - Цикл анализа завершён")
-        await asyncio.sleep(CHECK_INTERVAL)
+            try:
+                coins = get_top_coins()
+                for coin in coins:
+                    try:
+                        signal = analyze_coin(coin['symbol'])
+                        if signal:
+                            # Для отправки из потока используем синхронный метод (через requests)
+                            # Но проще вызвать send_message через bot, но у нас нет бота в этом потоке.
+                            # Поэтому сделаем отдельную функцию отправки через запрос
+                            send_message_via_telegram(signal)
+                            time.sleep(1)
+                    except Exception as e:
+                        print(f"Ошибка {coin['symbol']}: {e}")
+                    time.sleep(0.5)
+                print(f"{datetime.now()} - Цикл анализа завершён")
+            except Exception as e:
+                print(f"Ошибка в фоновом анализе: {e}")
+        time.sleep(CHECK_INTERVAL)
+
+def send_message_via_telegram(text):
+    import requests as rq
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        rq.post(url, json={"chat_id": OWNER_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
 
 # ---------- ОБРАБОТЧИКИ КОМАНД И КНОПОК ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -373,6 +387,10 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- ЗАПУСК ----------
 def main():
+    # Запускаем фоновый анализ в отдельном потоке
+    thread = threading.Thread(target=background_analysis, daemon=True)
+    thread.start()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("enable", enable))
@@ -380,9 +398,6 @@ def main():
     app.add_handler(CommandHandler("restart", restart))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.Text(["🟢 Включить", "🔴 Отключить", "🔄 Перезагрузить", "ℹ️ Статус"]), handle_buttons))
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(analysis_loop(app))
 
     print("Бот запущен. Напишите /start в Telegram.")
     app.run_polling(drop_pending_updates=True)
