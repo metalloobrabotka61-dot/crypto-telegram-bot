@@ -6,98 +6,58 @@ from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
-CHAT_ID = "694614387"                    # куда присылать сигналы
+CHAT_ID = "694614387"
 
-# Параметры отбора мелких монет
-MAX_COINS = 150                       # максимум монет для анализа
-MAX_CAP_USD = 100_000_000             # максимальная капитализация ($100 млн)
-CHECK_INTERVAL = 1800                 # 30 минут
+# Настройки отбора монет
+MAX_PAIRS = 300                        # максимум монет (все USDT пары, 300 шт)
+MIN_24H_VOLUME_USDT = 20_000           # мин. объём $20k (отсекаем совсем мёртвые)
 
-# Параметры анализа (не меняем)
-MIN_CHANGE_5M = 0.3
+# Настройки анализа (ослаблены для появления сигналов)
+CHECK_INTERVAL = 1800                  # 30 минут (можно уменьшить)
+MIN_CHANGE_5M = 0.2                    # мин. изменение за 5 мин
 LEVERAGE = 10
-MIN_AGREEMENT = 5                     # 5 из 7 индикаторов
+MIN_AGREEMENT = 3                      # 3 из 7 индикаторов (было 5)
 
-# Индикаторы (без изменений)
+# Индикаторы
 RSI_PERIOD = 14; RSI_OVERSOLD = 30; RSI_OVERBOUGHT = 70
 EMA_SHORT = 9; EMA_LONG = 21
 VOLUME_SURGE_FACTOR = 1.5
 ADX_PERIOD = 14; ADX_STRONG = 25
 SMA50_PERIOD = 50
 BB_PERIOD = 20; BB_STD = 2
-REQUIRE_FUNDING = False               # фандинг отключён
-MIN_VOL_RATIO = 1.2
-RSI_LIMIT_LONG = 55
-RSI_LIMIT_SHORT = 45
+REQUIRE_FUNDING = False                # фандинг не используем
+MIN_VOL_RATIO = 0.8                    # объёмный всплеск (было 1.2, ослабили)
+RSI_LIMIT_LONG = 99                    # убрали ограничение RSI
+RSI_LIMIT_SHORT = 1
 # =================================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ---------- ФУНКЦИЯ ПОЛУЧЕНИЯ МЕЛКИХ МОНЕТ (с защитой от ошибок) ----------
-def get_small_coins():
-    coins = []
-    page = 1
-    per_page = 100
-    max_retries = 3
-    
-    while len(coins) < MAX_COINS and page <= 3:
-        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_asc&per_page={per_page}&page={page}&sparkline=false"
-        data = None
-        for attempt in range(max_retries):
-            try:
-                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-                if r.status_code == 200:
-                    # Проверяем, что ответ — это список (не текст ошибки)
-                    json_data = r.json()
-                    if isinstance(json_data, list):
-                        data = json_data
-                        break
-                    else:
-                        print(f"CoinGecko вернул не список (попытка {attempt+1})")
-                else:
-                    print(f"CoinGecko статус {r.status_code} (попытка {attempt+1})")
-                time.sleep(3)
-            except Exception as e:
-                print(f"Ошибка запроса CoinGecko: {e} (попытка {attempt+1})")
-                time.sleep(3)
-        if data is None:
-            print(f"Не удалось получить страницу {page}, перехожу дальше")
-            page += 1
-            continue
-        
-        for coin in data:
-            cap = coin.get('market_cap', 0)
-            if cap >= MAX_CAP_USD:
-                break
-            symbol = coin['symbol'].upper()
-            if symbol in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
-                continue
-            if 'stable' in coin.get('name', '').lower():
-                continue
-            # Проверяем, торгуется ли монета на Binance
-            if not is_pair_on_binance(symbol):
-                continue
-            coins.append({
-                'symbol': symbol,
-                'market_cap': cap,
-                'volume': coin.get('total_volume', 0)
-            })
-            if len(coins) >= MAX_COINS:
-                break
-        page += 1
-        time.sleep(2)  # пауза между страницами, чтобы не перегружать API
-    
-    print(f"Получено {len(coins)} мелких монет (кап < ${MAX_CAP_USD:,})")
-    return coins
-
-def is_pair_on_binance(symbol):
-    """Проверяет, существует ли USDT пара на Binance (быстро, без загрузки всего ticker)"""
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
+# ---------- ПОЛУЧЕНИЕ ВСЕХ USDT ПАР с Binance ----------
+def get_all_usdt_pairs():
+    url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
-        r = requests.get(url, timeout=5)
-        return r.status_code == 200
-    except:
-        return False
+        r = requests.get(url, timeout=15)
+        data = r.json()
+        if not isinstance(data, list):
+            return []
+        usdt_pairs = [item for item in data if item['symbol'].endswith('USDT')]
+        # Сортируем по объёму (quoteVolume) от большего к меньшему
+        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
+        coins = []
+        for pair in usdt_pairs[:MAX_PAIRS]:
+            sym = pair['symbol'].replace('USDT', '')
+            # Исключаем стейблкоины и BTC/ETH (можно убрать, если хотите)
+            if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
+                continue
+            vol = float(pair['quoteVolume'])
+            if vol >= MIN_24H_VOLUME_USDT:
+                coins.append({'symbol': sym, 'volume': vol})
+        print(f"Получено {len(coins)} монет для анализа")
+        return coins
+    except Exception as e:
+        print(f"Ошибка Binance: {e}")
+        return []
 
 # ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни) без изменений ----------
 def get_klines(symbol, interval='5m', limit=200):
@@ -113,10 +73,6 @@ def get_klines(symbol, interval='5m', limit=200):
         return closes, highs, lows, vols
     except:
         return [], [], [], []
-
-def get_funding_rate(symbol):
-    # фандинг не используется, но оставим для совместимости
-    return None
 
 def calculate_rsi(closes, period=14):
     if len(closes) < period+1: return None
@@ -250,52 +206,91 @@ def analyze_coin(symbol):
     ind = {}
     desc = {}
     if rsi_5m:
-        if rsi_5m < RSI_OVERSOLD: ind['rsi']='long'; desc['rsi']=f"RSI={rsi_5m:.1f} перепродан"
-        elif rsi_5m > RSI_OVERBOUGHT: ind['rsi']='short'; desc['rsi']=f"RSI={rsi_5m:.1f} перекуплен"
-        else: desc['rsi']=f"RSI={rsi_5m:.1f} нейтр."
+        if rsi_5m < RSI_OVERSOLD:
+            ind['rsi']='long'
+            desc['rsi']=f"RSI={rsi_5m:.1f} перепродан"
+        elif rsi_5m > RSI_OVERBOUGHT:
+            ind['rsi']='short'
+            desc['rsi']=f"RSI={rsi_5m:.1f} перекуплен"
+        else:
+            desc['rsi']=f"RSI={rsi_5m:.1f} нейтр."
     ema_s = calculate_ema(closes_5m, EMA_SHORT)
     ema_l = calculate_ema(closes_5m, EMA_LONG)
     if ema_s and ema_l:
-        if ema_s > ema_l: ind['ema']='long'; desc['ema']=f"EMA{EMA_SHORT}>{EMA_LONG}"
-        else: ind['ema']='short'; desc['ema']=f"EMA{EMA_SHORT}<{EMA_LONG}"
+        if ema_s > ema_l:
+            ind['ema']='long'
+            desc['ema']=f"EMA{EMA_SHORT}>{EMA_LONG}"
+        else:
+            ind['ema']='short'
+            desc['ema']=f"EMA{EMA_SHORT}<{EMA_LONG}"
     bb_up, bb_low, _ = calculate_bollinger_bands(closes_5m, BB_PERIOD, BB_STD)
     if bb_up and bb_low:
-        if current_price < bb_low: ind['bb']='long'; desc['bb']="Цена ниже нижней полосы"
-        elif current_price > bb_up: ind['bb']='short'; desc['bb']="Цена выше верхней полосы"
-        else: desc['bb']="Цена внутри полос"
+        if current_price < bb_low:
+            ind['bb']='long'
+            desc['bb']="Цена ниже нижней полосы"
+        elif current_price > bb_up:
+            ind['bb']='short'
+            desc['bb']="Цена выше верхней полосы"
+        else:
+            desc['bb']="Цена внутри полос"
     macd = calculate_macd_diff(closes_5m, 12, 26)
     if macd:
-        if macd>0: ind['macd']='long'; desc['macd']="MACD положительный"
-        else: ind['macd']='short'; desc['macd']="MACD отрицательный"
+        if macd>0:
+            ind['macd']='long'
+            desc['macd']="MACD положительный"
+        else:
+            ind['macd']='short'
+            desc['macd']="MACD отрицательный"
     if vol_ratio > VOLUME_SURGE_FACTOR:
-        if len(closes_5m)>=2 and closes_5m[-1]>closes_5m[-2]: ind['volume']='long'; desc['volume']=f"Всплеск объёма x{vol_ratio:.1f} на росте"
-        elif closes_5m[-1]<closes_5m[-2]: ind['volume']='short'; desc['volume']=f"Всплеск объёма x{vol_ratio:.1f} на падении"
-        else: desc['volume']="Всплеск объёма"
-    else: desc['volume']="Объём в норме"
+        if len(closes_5m)>=2 and closes_5m[-1]>closes_5m[-2]:
+            ind['volume']='long'
+            desc['volume']=f"Всплеск объёма x{vol_ratio:.1f} на росте"
+        elif closes_5m[-1]<closes_5m[-2]:
+            ind['volume']='short'
+            desc['volume']=f"Всплеск объёма x{vol_ratio:.1f} на падении"
+        else:
+            desc['volume']="Всплеск объёма"
+    else:
+        desc['volume']="Объём в норме"
     adx = calculate_adx(highs_5m, lows_5m, closes_5m, ADX_PERIOD)
     if adx and adx > ADX_STRONG:
-        if ind.get('ema')=='long': ind['adx']='long'; desc['adx']=f"ADX={adx} сильный тренд вверх"
-        elif ind.get('ema')=='short': ind['adx']='short'; desc['adx']=f"ADX={adx} сильный тренд вниз"
-        else: desc['adx']=f"ADX={adx} сильный тренд"
-    else: desc['adx']=f"ADX={adx if adx else '?'} слабый тренд"
+        if ind.get('ema')=='long':
+            ind['adx']='long'
+            desc['adx']=f"ADX={adx} сильный тренд вверх"
+        elif ind.get('ema')=='short':
+            ind['adx']='short'
+            desc['adx']=f"ADX={adx} сильный тренд вниз"
+        else:
+            desc['adx']=f"ADX={adx} сильный тренд"
+    else:
+        desc['adx']=f"ADX={adx if adx else '?'} слабый тренд"
     sma50 = calculate_sma(closes_5m, SMA50_PERIOD)
     if sma50:
-        if current_price > sma50: ind['sma50']='long'; desc['sma50']="Цена выше SMA50"
-        else: ind['sma50']='short'; desc['sma50']="Цена ниже SMA50"
+        if current_price > sma50:
+            ind['sma50']='long'
+            desc['sma50']="Цена выше SMA50"
+        else:
+            ind['sma50']='short'
+            desc['sma50']="Цена ниже SMA50"
 
     votes = [ind.get(k) for k in ['rsi','ema','bb','macd','volume','adx','sma50'] if ind.get(k) is not None]
     long_votes = votes.count('long'); short_votes = votes.count('short')
     direction = None
-    if long_votes >= MIN_AGREEMENT: direction = 'long'
-    elif short_votes >= MIN_AGREEMENT: direction = 'short'
-    if not direction: return None
+    if long_votes >= MIN_AGREEMENT:
+        direction = 'long'
+    elif short_votes >= MIN_AGREEMENT:
+        direction = 'short'
+    if not direction:
+        return None
 
-    # Отключаем проверку фандинга
-    # funding = get_funding_rate(symbol)
-    # if REQUIRE_FUNDING and funding is not None: ...
-    if vol_ratio < MIN_VOL_RATIO: return None
-    if direction == 'long' and rsi_5m is not None and rsi_5m > RSI_LIMIT_LONG: return None
-    if direction == 'short' and rsi_5m is not None and rsi_5m < RSI_LIMIT_SHORT: return None
+    # Объёмный фильтр (ослаблен)
+    if vol_ratio < MIN_VOL_RATIO:
+        return None
+    # RSI фильтры отключены (лимиты 99 и 1)
+    if direction == 'long' and rsi_5m is not None and rsi_5m > RSI_LIMIT_LONG:
+        return None
+    if direction == 'short' and rsi_5m is not None and rsi_5m < RSI_LIMIT_SHORT:
+        return None
 
     supports, resistances = find_support_resistance(highs_5m, lows_5m, current_price)
     fibo = find_fibo_levels(highs_5m, lows_5m, closes_5m)
@@ -329,23 +324,23 @@ def analyze_coin(symbol):
 
 # ---------- ОСНОВНОЙ ЦИКЛ ----------
 def main():
-    print(f"Бот запущен. Анализ мелких монет (капитализация < ${MAX_CAP_USD:,}) до {MAX_COINS} штук каждые {CHECK_INTERVAL//60} минут.")
+    print(f"Бот запущен. Анализ всех USDT пар (до {MAX_PAIRS} монет) каждые {CHECK_INTERVAL//60} мин.")
     while True:
         try:
-            coins = get_small_coins()
+            coins = get_all_usdt_pairs()
             if not coins:
-                print("Нет мелких монет, повтор через 60 сек")
+                print("Нет монет, повтор через 60 сек")
                 time.sleep(60)
                 continue
             print(f"Начинаю анализ {len(coins)} монет...")
             for coin in coins:
                 symbol = coin['symbol']
-                print(f"Анализирую {symbol} (кап: ${coin['market_cap']:,.0f})")
+                print(f"Анализирую {symbol}")
                 signal = analyze_coin(symbol)
                 if signal:
                     bot.send_message(CHAT_ID, signal, parse_mode='HTML')
                     time.sleep(1)
-                time.sleep(0.5)  # пауза между запросами к Binance
+                time.sleep(0.5)  # пауза между запросами
             print(f"{datetime.now()} - Цикл анализа завершён")
         except Exception as e:
             print(f"Ошибка в основном цикле: {e}")
