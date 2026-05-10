@@ -6,17 +6,19 @@ from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
-CHAT_ID = "694614387"              # куда присылать сигналы
+CHAT_ID = "694614387"                   # куда присылать сигналы
+
+# Параметры отбора монет
+MAX_COINS = 200                       # максимум монет для анализа
+MAX_CAP_USD = 100_000_000             # максимальная капитализация ($100 млн) – только мелкие
 
 # Параметры анализа
-CHECK_INTERVAL = 1800            # 30 минут (увеличено из-за большого числа монет)
-MIN_VOLUME_USDT = 50_000         # мин. объём $50k (отсекаем совсем мёртвые)
-MAX_PAIRS = 500                  # максимум монет (Binance USDT пар ~700, 500 хватит)
+CHECK_INTERVAL = 1800                 # 30 минут
 MIN_CHANGE_5M = 0.3
 LEVERAGE = 10
-MIN_AGREEMENT = 5                # 5 из 7 индикаторов
+MIN_AGREEMENT = 5                     # 5 из 7 индикаторов
 
-# Индикаторы
+# Индикаторы (без изменений)
 RSI_PERIOD = 14; RSI_OVERSOLD = 30; RSI_OVERBOUGHT = 70
 EMA_SHORT = 9; EMA_LONG = 21
 VOLUME_SURGE_FACTOR = 1.5
@@ -31,33 +33,57 @@ RSI_LIMIT_SHORT = 45
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ---------- ФУНКЦИЯ ПОЛУЧЕНИЯ ВСЕХ USDT ПАР (сортировка по объёму) ----------
-def get_all_usdt_pairs():
-    try:
-        url = "https://api.binance.com/api/v3/ticker/24hr"
-        r = requests.get(url, timeout=15)
-        data = r.json()
-        if not isinstance(data, list):
-            return []
-        # Фильтруем USDT пары
-        usdt_pairs = [item for item in data if item['symbol'].endswith('USDT')]
-        # Сортируем по объёму (quoteVolume) от больших к малым
-        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
-        coins = []
-        for pair in usdt_pairs[:MAX_PAIRS]:
-            sym = pair['symbol'].replace('USDT', '')
-            # Исключаем BTC, ETH и стейблкоины
-            if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
-                continue
-            vol = float(pair['quoteVolume'])
-            if vol >= MIN_VOLUME_USDT:
-                coins.append({'symbol': sym, 'volume': vol})
-        return coins
-    except Exception as e:
-        print(f"Ошибка получения списка Binance: {e}")
-        return []
+# ---------- ФУНКЦИЯ ПОЛУЧЕНИЯ МЕЛКИХ МОНЕТ (CoinGecko) ----------
+def get_small_coins(max_cap_usd=MAX_CAP_USD, limit=MAX_COINS):
+    """Возвращает список мелких монет (капитализация < max_cap_usd), отсортированных по возрастанию капитализации"""
+    coins = []
+    page = 1
+    per_page = 100
+    while len(coins) < limit and page <= 3:  # максимум 3 страницы
+        url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_asc&per_page={per_page}&page={page}&sparkline=false"
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            data = r.json()
+            if not isinstance(data, list):
+                break
+            for coin in data:
+                cap = coin.get('market_cap', 0)
+                if cap >= max_cap_usd:
+                    # так как сортировка по возрастанию, дальше будут только крупнее – можно выходить
+                    break
+                symbol = coin['symbol'].upper()
+                # Исключаем стейблкоины и биткоин с эфиром (хотя они и так не попадут по капу)
+                if symbol in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
+                    continue
+                if 'stable' in coin['name'].lower():
+                    continue
+                # Проверяем, есть ли монета на Binance (USDT пара)
+                if not is_pair_on_binance(symbol):
+                    continue
+                coins.append({
+                    'symbol': symbol,
+                    'market_cap': cap,
+                    'volume': coin.get('total_volume', 0)
+                })
+                if len(coins) >= limit:
+                    break
+            page += 1
+            time.sleep(1.5)  # пауза между страницами
+        except Exception as e:
+            print(f"Ошибка получения мелких монет: {e}")
+            break
+    return coins[:limit]
 
-# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни, анализ) без изменений ----------
+def is_pair_on_binance(symbol):
+    """Проверяет, существует ли USDT пара на Binance"""
+    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
+    try:
+        r = requests.get(url, timeout=5)
+        return r.status_code == 200
+    except:
+        return False
+
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни) БЕЗ ИЗМЕНЕНИЙ ----------
 def get_klines(symbol, interval='5m', limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
@@ -292,23 +318,25 @@ def analyze_coin(symbol):
 """
     return msg
 
-# ---------- ОСНОВНОЙ ЦИКЛ (без кнопок) ----------
+# ---------- ОСНОВНОЙ ЦИКЛ ----------
 def main():
-    print(f"Бот запущен. Анализ {MAX_PAIRS} монет каждые {CHECK_INTERVAL//60} минут.")
+    print(f"Бот запущен. Анализ мелких монет (капитализация < ${MAX_CAP_USD:,}) до {MAX_COINS} штук каждые {CHECK_INTERVAL//60} минут.")
     while True:
         try:
-            coins = get_all_usdt_pairs()
+            coins = get_small_coins()
             if not coins:
-                print("Нет монет, повтор через 60 сек")
+                print("Нет мелких монет, повтор через 60 сек")
                 time.sleep(60)
                 continue
-            print(f"Получено {len(coins)} монет для анализа")
+            print(f"Получено {len(coins)} мелких монет для анализа")
             for coin in coins:
-                signal = analyze_coin(coin['symbol'])
+                symbol = coin['symbol']
+                print(f"Анализирую {symbol}, кап: ${coin['market_cap']:,}")
+                signal = analyze_coin(symbol)
                 if signal:
                     bot.send_message(CHAT_ID, signal, parse_mode='HTML')
-                    time.sleep(1)  # пауза между сигналами
-                time.sleep(0.3)    # пауза между запросами к Binance
+                    time.sleep(1)
+                time.sleep(0.5)  # пауза между запросами к Binance
             print(f"{datetime.now()} - Цикл анализа завершён")
         except Exception as e:
             print(f"Ошибка в основном цикле: {e}")
