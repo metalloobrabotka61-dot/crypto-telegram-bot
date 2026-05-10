@@ -6,12 +6,12 @@ from datetime import datetime
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
-CHAT_ID = "694614387"               # куда присылать сигналы
+CHAT_ID = "694614387"              # куда присылать сигналы
 
 # Параметры анализа
-CHECK_INTERVAL = 900             # 15 минут
-TOP_COINS = 20
-MIN_VOLUME_USDT = 7_500_000
+CHECK_INTERVAL = 1800            # 30 минут (увеличено из-за большого числа монет)
+MIN_VOLUME_USDT = 50_000         # мин. объём $50k (отсекаем совсем мёртвые)
+MAX_PAIRS = 500                  # максимум монет (Binance USDT пар ~700, 500 хватит)
 MIN_CHANGE_5M = 0.3
 LEVERAGE = 10
 MIN_AGREEMENT = 5                # 5 из 7 индикаторов
@@ -31,51 +31,33 @@ RSI_LIMIT_SHORT = 45
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# ---------- ФУНКЦИИ ПОЛУЧЕНИЯ ДАННЫХ ----------
-def get_top_coins(max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=50&page=1&sparkline=false"
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, list):
-                    exclude = ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']
-                    coins = []
-                    for coin in data:
-                        sym = coin.get('symbol', '').upper()
-                        if sym in exclude: continue
-                        if 'stable' in coin.get('name', '').lower(): continue
-                        vol = coin.get('total_volume', 0)
-                        if vol >= MIN_VOLUME_USDT:
-                            coins.append({'symbol': sym, 'volume': vol})
-                    if coins:
-                        return coins[:TOP_COINS]
-            time.sleep(2)
-        except Exception as e:
-            print(f"CoinGecko ошибка: {e}")
-            time.sleep(2)
-    # Fallback Binance
+# ---------- ФУНКЦИЯ ПОЛУЧЕНИЯ ВСЕХ USDT ПАР (сортировка по объёму) ----------
+def get_all_usdt_pairs():
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
         data = r.json()
-        if isinstance(data, list):
-            usdt_pairs = [item for item in data if item['symbol'].endswith('USDT')]
-            usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
-            coins = []
-            for pair in usdt_pairs[:TOP_COINS*2]:
-                sym = pair['symbol'].replace('USDT', '')
-                if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
-                    continue
-                vol = float(pair['quoteVolume'])
-                if vol >= MIN_VOLUME_USDT:
-                    coins.append({'symbol': sym, 'volume': vol})
-            return coins[:TOP_COINS]
+        if not isinstance(data, list):
+            return []
+        # Фильтруем USDT пары
+        usdt_pairs = [item for item in data if item['symbol'].endswith('USDT')]
+        # Сортируем по объёму (quoteVolume) от больших к малым
+        usdt_pairs.sort(key=lambda x: float(x['quoteVolume']), reverse=True)
+        coins = []
+        for pair in usdt_pairs[:MAX_PAIRS]:
+            sym = pair['symbol'].replace('USDT', '')
+            # Исключаем BTC, ETH и стейблкоины
+            if sym in ['BTC','ETH','USDT','USDC','DAI','BUSD','TUSD','FDUSD']:
+                continue
+            vol = float(pair['quoteVolume'])
+            if vol >= MIN_VOLUME_USDT:
+                coins.append({'symbol': sym, 'volume': vol})
+        return coins
     except Exception as e:
-        print(f"Binance ошибка: {e}")
-    return []
+        print(f"Ошибка получения списка Binance: {e}")
+        return []
 
+# ---------- ОСТАЛЬНЫЕ ФУНКЦИИ (индикаторы, уровни, анализ) без изменений ----------
 def get_klines(symbol, interval='5m', limit=200):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
@@ -98,7 +80,6 @@ def get_funding_rate(symbol):
     except:
         return None
 
-# ---------- ИНДИКАТОРЫ ----------
 def calculate_rsi(closes, period=14):
     if len(closes) < period+1: return None
     gains, losses = [], []
@@ -313,20 +294,21 @@ def analyze_coin(symbol):
 
 # ---------- ОСНОВНОЙ ЦИКЛ (без кнопок) ----------
 def main():
-    print("Бот запущен. Анализ каждые 15 минут.")
+    print(f"Бот запущен. Анализ {MAX_PAIRS} монет каждые {CHECK_INTERVAL//60} минут.")
     while True:
         try:
-            coins = get_top_coins()
+            coins = get_all_usdt_pairs()
             if not coins:
                 print("Нет монет, повтор через 60 сек")
                 time.sleep(60)
                 continue
+            print(f"Получено {len(coins)} монет для анализа")
             for coin in coins:
                 signal = analyze_coin(coin['symbol'])
                 if signal:
                     bot.send_message(CHAT_ID, signal, parse_mode='HTML')
                     time.sleep(1)  # пауза между сигналами
-                time.sleep(0.5)
+                time.sleep(0.3)    # пауза между запросами к Binance
             print(f"{datetime.now()} - Цикл анализа завершён")
         except Exception as e:
             print(f"Ошибка в основном цикле: {e}")
