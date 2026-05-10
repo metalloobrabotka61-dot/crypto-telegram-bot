@@ -1,19 +1,18 @@
-import asyncio
+import telebot
 import requests
 import time
 import math
 import threading
 from datetime import datetime
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ========== НАСТРОЙКИ ==========
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
-OWNER_CHAT_ID = "694614387"  # укажите ID или оставьте пустой, если не нужны сигналы
+OWNER_CHAT_ID = ""694614387""   # сюда будут приходить сигналы
 
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 bot_enabled = True
 
-# Параметры анализа (оставлены без изменений)
+# Параметры анализа
 CHECK_INTERVAL = 900
 TOP_COINS = 20
 MIN_VOLUME_USDT = 7_500_000
@@ -33,7 +32,7 @@ RSI_LIMIT_LONG = 55
 RSI_LIMIT_SHORT = 45
 # =================================
 
-# ---------- ФУНКЦИИ ПОЛУЧЕНИЯ ДАННЫХ (с ретраями и fallback) ----------
+# ---------- ФУНКЦИИ ПОЛУЧЕНИЯ ДАННЫХ ----------
 def get_top_coins(max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -57,7 +56,7 @@ def get_top_coins(max_retries=3):
         except Exception as e:
             print(f"CoinGecko ошибка: {e}, попытка {attempt+1}")
             time.sleep(2)
-    # Fallback: Binance
+    # Fallback Binance
     print("Использую Binance для списка монет")
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
@@ -101,7 +100,7 @@ def get_funding_rate(symbol):
     except:
         return None
 
-# ---------- ИНДИКАТОРЫ (полностью аналогичны предыдущей версии) ----------
+# ---------- ИНДИКАТОРЫ (остаются без изменений) ----------
 def calculate_rsi(closes, period=14):
     if len(closes) < period+1: return None
     gains, losses = [], []
@@ -150,18 +149,21 @@ def calculate_adx(highs, lows, closes, period=14):
         low_diff = lows[i-1]-lows[i]
         plus.append(high_diff if high_diff>low_diff and high_diff>0 else 0)
         minus.append(low_diff if low_diff>high_diff and low_diff>0 else 0)
-    if len(tr) < period: return None
+    if len(tr) < period:
+        return None
     avg_tr = sum(tr[-period:])/period
     avg_plus = sum(plus[-period:])/period
     avg_minus = sum(minus[-period:])/period
-    if avg_tr == 0: return None
+    if avg_tr == 0:
+        return None
     plus_di = avg_plus/avg_tr*100
     minus_di = avg_minus/avg_tr*100
     dx = abs(plus_di-minus_di)/(plus_di+minus_di)*100 if (plus_di+minus_di)!=0 else 0
     return round(dx,1)
 
 def find_fibo_levels(highs, lows, closes):
-    if len(closes) < 100: return {}
+    if len(closes) < 100:
+        return {}
     segment_highs = highs[-100:]
     segment_lows = lows[-100:]
     local_max = max(segment_highs)
@@ -314,93 +316,79 @@ def analyze_coin(symbol):
 """
     return msg
 
-# ---------- ФОНОВЫЙ АНАЛИЗ В ОТДЕЛЬНОМ ПОТОКЕ ----------
-def background_analysis():
+# ---------- ФОНОВЫЙ АНАЛИЗ ----------
+def analysis_loop():
     global bot_enabled
     while True:
         if bot_enabled and OWNER_CHAT_ID:
-            try:
-                coins = get_top_coins()
-                for coin in coins:
-                    try:
-                        signal = analyze_coin(coin['symbol'])
-                        if signal:
-                            # Для отправки из потока используем синхронный метод (через requests)
-                            # Но проще вызвать send_message через bot, но у нас нет бота в этом потоке.
-                            # Поэтому сделаем отдельную функцию отправки через запрос
-                            send_message_via_telegram(signal)
-                            time.sleep(1)
-                    except Exception as e:
-                        print(f"Ошибка {coin['symbol']}: {e}")
-                    time.sleep(0.5)
-                print(f"{datetime.now()} - Цикл анализа завершён")
-            except Exception as e:
-                print(f"Ошибка в фоновом анализе: {e}")
+            coins = get_top_coins()
+            for coin in coins:
+                try:
+                    signal = analyze_coin(coin['symbol'])
+                    if signal:
+                        bot.send_message(OWNER_CHAT_ID, signal, parse_mode='HTML')
+                        time.sleep(1)
+                except Exception as e:
+                    print(f"Ошибка {coin['symbol']}: {e}")
+                time.sleep(0.5)
+            print(f"{datetime.now()} - Цикл анализа завершён")
         time.sleep(CHECK_INTERVAL)
 
-def send_message_via_telegram(text):
-    import requests as rq
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        rq.post(url, json={"chat_id": OWNER_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
-    except Exception as e:
-        print(f"Ошибка отправки: {e}")
-
 # ---------- ОБРАБОТЧИКИ КОМАНД И КНОПОК ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [KeyboardButton("🟢 Включить"), KeyboardButton("🔴 Отключить")],
-        [KeyboardButton("🔄 Перезагрузить"), KeyboardButton("ℹ️ Статус")]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("Управление ботом", reply_markup=reply_markup)
+@bot.message_handler(commands=['start'])
+def start(message):
+    if OWNER_CHAT_ID and str(message.chat.id) != OWNER_CHAT_ID:
+        bot.reply_to(message, "Не авторизован")
+        return
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn_enable = telebot.types.KeyboardButton('🟢 Включить')
+    btn_disable = telebot.types.KeyboardButton('🔴 Отключить')
+    btn_restart = telebot.types.KeyboardButton('🔄 Перезагрузить')
+    btn_status = telebot.types.KeyboardButton('ℹ️ Статус')
+    markup.add(btn_enable, btn_disable, btn_restart, btn_status)
+    bot.send_message(message.chat.id, "Управление ботом", reply_markup=markup)
 
-async def enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['enable'])
+def enable(message):
     global bot_enabled
     bot_enabled = True
-    await update.message.reply_text("✅ Бот включён, сигналы будут отправляться.")
+    bot.reply_to(message, "✅ Бот включён, сигналы будут отправляться.")
 
-async def disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['disable'])
+def disable(message):
     global bot_enabled
     bot_enabled = False
-    await update.message.reply_text("⛔ Бот отключён, сигналы не отправляются.")
+    bot.reply_to(message, "⛔ Бот отключён, сигналы не отправляются.")
 
-async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['restart'])
+def restart(message):
     global bot_enabled
     bot_enabled = True
-    await update.message.reply_text("🔄 Бот перезагружен, состояние сброшено.")
+    bot.reply_to(message, "🔄 Бот перезагружен, состояние сброшено.")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@bot.message_handler(commands=['status'])
+def status(message):
     status_text = "включён 🟢" if bot_enabled else "отключён 🔴"
-    await update.message.reply_text(f"Статус бота: {status_text}")
+    bot.reply_to(message, f"Статус бота: {status_text}")
 
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "🟢 Включить":
-        await enable(update, context)
-    elif text == "🔴 Отключить":
-        await disable(update, context)
-    elif text == "🔄 Перезагрузить":
-        await restart(update, context)
-    elif text == "ℹ️ Статус":
-        await status(update, context)
+@bot.message_handler(func=lambda message: message.text == '🟢 Включить')
+def btn_enable(message):
+    enable(message)
+
+@bot.message_handler(func=lambda message: message.text == '🔴 Отключить')
+def btn_disable(message):
+    disable(message)
+
+@bot.message_handler(func=lambda message: message.text == '🔄 Перезагрузить')
+def btn_restart(message):
+    restart(message)
+
+@bot.message_handler(func=lambda message: message.text == 'ℹ️ Статус')
+def btn_status(message):
+    status(message)
 
 # ---------- ЗАПУСК ----------
-def main():
-    # Запускаем фоновый анализ в отдельном потоке
-    thread = threading.Thread(target=background_analysis, daemon=True)
-    thread.start()
-
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("enable", enable))
-    app.add_handler(CommandHandler("disable", disable))
-    app.add_handler(CommandHandler("restart", restart))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(MessageHandler(filters.Text(["🟢 Включить", "🔴 Отключить", "🔄 Перезагрузить", "ℹ️ Статус"]), handle_buttons))
-
-    print("Бот запущен. Напишите /start в Telegram.")
-    app.run_polling(drop_pending_updates=True)
-
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=analysis_loop, daemon=True).start()
+    print("Бот запущен. Напишите /start в Telegram.")
+    bot.infinity_polling()
