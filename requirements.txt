@@ -1,2 +1,5 @@
-pyTelegramBotAPI
-requests
+aiohttp
+schedule
+python-telegram-bot
+asgiref
+python-dotenv
