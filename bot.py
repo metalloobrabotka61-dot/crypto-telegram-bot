@@ -5,8 +5,17 @@ from datetime import datetime
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
-# Список монет (символы в нижнем регистре для CoinGecko)
-COINS_LOW = ["1000lunc", "luna2", "ustc", "anc", "mir", "bat", "zrx", "rep", "snx", "comp", "mkr", "yfi", "crv", "uni", "sushi", "cake", "bake", "alpha", "beta", "gala", "chz", "ogn", "storj", "blz", "coti", "hot", "iost", "iotx", "knc", "lrc", "nkn", "nmr", "pols", "rare", "req", "rlc", "stmx", "sxp", "twt", "vidt", "wan", "waxp", "zen", "zks", "enj", "zil", "klay", "one", "icx", "xtz", "ont", "qtum", "waves", "ksm", "rune", "pepe", "wif", "bonk", "floki", "not", "ton", "op", "arb", "sui", "apt", "inj", "sei", "tia", "pyth", "jup", "ondo", "strk", "ena", "ethfi"]
+# Проверенные монеты, которые точно есть на Binance (USDT пары)
+COINS = [
+    "1000LUNC", "LUNA2", "USTC", "ANC", "MIR", "BAT", "ZRX", "REP", "SNX", "COMP",
+    "MKR", "YFI", "CRV", "UNI", "SUSHI", "CAKE", "BAKE", "ALPHA", "BETA", "GALA",
+    "CHZ", "OGN", "STORJ", "BLZ", "COTI", "HOT", "IOST", "IOTX", "KNC", "LRC",
+    "NKN", "NMR", "POLS", "RARE", "REQ", "RLC", "STMX", "SXP", "TWT", "VIDT",
+    "WAN", "WAXP", "ZEN", "ZKS", "ENJ", "ZIL", "KLAY", "ONE", "ICX", "XTZ",
+    "ONT", "QTUM", "WAVES", "KSM", "RUNE", "PEPE", "WIF", "BONK", "FLOKI", "NOT",
+    "TON", "OP", "ARB", "SUI", "APT", "INJ", "SEI", "TIA", "PYTH", "JUP",
+    "ONDO", "STRK", "ENA", "ETHFI"
+]
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -15,50 +24,53 @@ def send_telegram(text):
     except:
         pass
 
-def get_24h_change_coingecko(coin_id):
-    """Возвращает изменение цены за 24 часа в процентах"""
-    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={coin_id}&order=market_cap_desc&per_page=1&page=1&sparkline=false"
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        data = r.json()
-        if data and isinstance(data, list) and len(data) > 0:
-            return data[0].get('price_change_percentage_24h', 0)
-    except Exception as e:
-        print(f"Ошибка {coin_id}: {e}")
+def get_klines_with_retry(symbol, interval='4h', limit=2, retries=3):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) == 2:
+                    return [float(data[0][4]), float(data[1][4])]
+            print(f"  {symbol}: попытка {attempt+1}, статус {r.status_code}")
+        except Exception as e:
+            print(f"  {symbol}: ошибка {e}, попытка {attempt+1}")
+        time.sleep(2)
     return None
 
-def get_current_price_coingecko(coin_id):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        data = r.json()
-        if data and coin_id in data:
-            return data[coin_id]['usd']
-    except:
-        pass
+def get_realtime_price_with_retry(symbol, retries=3):
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                return float(r.json()['price'])
+        except:
+            pass
+        time.sleep(1)
     return None
 
 def scan():
-    print(f"[{datetime.now()}] Сканирование через CoinGecko (24h изменение)...")
-    for coin_id in COINS_LOW:
-        change = get_24h_change_coingecko(coin_id)
-        if change is None:
-            print(f"  {coin_id}: нет данных")
+    print(f"[{datetime.now()}] Сканирование...")
+    for sym in COINS:
+        klines = get_klines_with_retry(sym)
+        if klines is None:
+            print(f"  {sym}: нет данных")
             continue
-        print(f"  {coin_id}: изменение за 24ч: {change:+.2f}%")
-        if change > 0.5:  # порог роста > 0.5% (для теста)
-            price = get_current_price_coingecko(coin_id)
+        old, new = klines
+        change = (new - old) / old * 100
+        print(f"  {sym}: {new:.6f}, 4ч назад {old:.6f}, изм {change:+.2f}%")
+        if change > 1.0:   # порог
+            price = get_realtime_price_with_retry(sym)
             if price:
-                msg = f"🔻 ТЕСТ SHORT {coin_id.upper()} | {price:.6f}\nРост за 24ч: {change:.2f}%"
-                send_telegram(msg)
+                send_telegram(f"🔻 SHORT {sym} | {price:.6f}\nРост за 4ч: {change:.2f}%")
                 print(f"    ✅ СИГНАЛ отправлен")
-            else:
-                print(f"    ❌ нет цены")
-        time.sleep(0.2)
+        time.sleep(0.5)
     print("Цикл завершён, жду 1 час.\n")
 
 if __name__ == "__main__":
-    send_telegram("🚀 Бот (низколиквидные монеты, CoinGecko, рост >0.5% за 24ч) запущен.")
+    send_telegram("🚀 Бот (Binance, повторные попытки) запущен.")
     while True:
         scan()
         time.sleep(3600)
