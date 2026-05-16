@@ -4,9 +4,9 @@ from datetime import datetime
 
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
-CMC_API_KEY = "be01a5f404a7494f9af4aa8bbbde0c41"  # получите на coinmarketcap.com/api
 
-COINS = ["1000LUNC","LUNA2","USTC","ANC","MIR","BAT","ZRX","REP","SNX","COMP","MKR","YFI","CRV","UNI","SUSHI","CAKE","BAKE","ALPHA","BETA","GALA","CHZ","OGN","STORJ","BLZ","COTI","HOT","IOST","IOTX","KNC","LRC","NKN","NMR","POLS","RARE","REQ","RLC","STMX","SXP","TWT","VIDT","WAN","WAXP","ZEN","ZKS","ENJ","ZIL","KLAY","ONE","ICX","XTZ","ONT","QTUM","WAVES","KSM","RUNE","PEPE","WIF","BONK","FLOKI","NOT","TON","OP","ARB","SUI","APT","INJ","SEI","TIA","PYTH","JUP","ONDO","STRK","ENA","ETHFI"]
+# Список монет (символы в нижнем регистре для CoinGecko)
+COINS_LOW = ["1000lunc", "luna2", "ustc", "anc", "mir", "bat", "zrx", "rep", "snx", "comp", "mkr", "yfi", "crv", "uni", "sushi", "cake", "bake", "alpha", "beta", "gala", "chz", "ogn", "storj", "blz", "coti", "hot", "iost", "iotx", "knc", "lrc", "nkn", "nmr", "pols", "rare", "req", "rlc", "stmx", "sxp", "twt", "vidt", "wan", "waxp", "zen", "zks", "enj", "zil", "klay", "one", "icx", "xtz", "ont", "qtum", "waves", "ksm", "rune", "pepe", "wif", "bonk", "floki", "not", "ton", "op", "arb", "sui", "apt", "inj", "sei", "tia", "pyth", "jup", "ondo", "strk", "ena", "ethfi"]
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -15,58 +15,50 @@ def send_telegram(text):
     except:
         pass
 
-def get_coin_data(symbol):
-    """Получает цену, процент изменения за 4ч и 24ч объём с CoinMarketCap"""
-    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
-    params = {"symbol": symbol, "convert": "USD"}
+def get_24h_change_coingecko(coin_id):
+    """Возвращает изменение цены за 24 часа в процентах"""
+    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids={coin_id}&order=market_cap_desc&per_page=1&page=1&sparkline=false"
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         data = r.json()
-        if data.get('status', {}).get('error_code') == 0:
-            quote = data['data'][symbol]['quote']['USD']
-            price = quote['price']
-            change_4h = quote.get('percent_change_4h', 0)
-            volume_24h = quote.get('volume_24h', 0)
-            return price, change_4h, volume_24h
+        if data and isinstance(data, list) and len(data) > 0:
+            return data[0].get('price_change_percentage_24h', 0)
     except Exception as e:
-        print(f"Ошибка {symbol}: {e}")
-    return None, None, None
+        print(f"Ошибка {coin_id}: {e}")
+    return None
 
-def analyze_coin(symbol):
-    price, change_4h, volume_24h = get_coin_data(symbol)
-    if price is None:
-        return None
-    if change_4h > 1.0:   # рост > 1% за 4 часа
-        msg = f"""
-🔻 <b>SHORT СИГНАЛ</b> <b>{symbol}</b> | {price:.6f}
-
-<b>Рост за 4ч:</b> {change_4h:+.2f}%
-<b>Объём 24ч:</b> {volume_24h/1e6:.2f}M
-
-💡 <b>Обоснование:</b> Рост за 4 часа превышает 1%, возможна коррекция вниз.
-
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        return msg
+def get_current_price_coingecko(coin_id):
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        data = r.json()
+        if data and coin_id in data:
+            return data[coin_id]['usd']
+    except:
+        pass
     return None
 
 def scan():
-    print(f"[{datetime.now()}] Сканирование через CoinMarketCap...")
-    for sym in COINS:
-        try:
-            sig = analyze_coin(sym)
-            if sig:
-                send_telegram(sig)
-                print(f"✅ {sym}")
-                time.sleep(2)
-        except Exception as e:
-            print(f"Ошибка {sym}: {e}")
+    print(f"[{datetime.now()}] Сканирование через CoinGecko (24h изменение)...")
+    for coin_id in COINS_LOW:
+        change = get_24h_change_coingecko(coin_id)
+        if change is None:
+            print(f"  {coin_id}: нет данных")
+            continue
+        print(f"  {coin_id}: изменение за 24ч: {change:+.2f}%")
+        if change > 0.5:  # порог роста > 0.5% (для теста)
+            price = get_current_price_coingecko(coin_id)
+            if price:
+                msg = f"🔻 ТЕСТ SHORT {coin_id.upper()} | {price:.6f}\nРост за 24ч: {change:.2f}%"
+                send_telegram(msg)
+                print(f"    ✅ СИГНАЛ отправлен")
+            else:
+                print(f"    ❌ нет цены")
         time.sleep(0.2)
     print("Цикл завершён, жду 1 час.\n")
 
 if __name__ == "__main__":
-    send_telegram("🚀 Бот (CoinMarketCap) запущен. Анализ низколиквидных монет.")
+    send_telegram("🚀 Бот (низколиквидные монеты, CoinGecko, рост >0.5% за 24ч) запущен.")
     while True:
         scan()
         time.sleep(3600)
