@@ -8,17 +8,18 @@ TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
 MAX_COINS = 500
-MAX_24H_VOLUME_USDT = 500_000         # низколиквидные: объём до $500k
+MAX_24H_VOLUME_USDT = 200_000
 MIN_24H_VOLUME_USDT = 0
 TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
 
-# ----- ПОРОГИ ДЛЯ СИГНАЛА (ОСЛАБЛЕНЫ) -----
-RSI_4H_MIN = 50
-RSI_1H_MIN = 50
-CHANGE_4H_MIN = 1.0
-FUNDING_MIN = -10.0                     # не фильтруем
-VOLUME_24H_MIN = 100_000
-# -----------------------------------------
+RSI_4H_MIN = 65
+RSI_1H_MIN = 65
+CHANGE_4H_MIN = 2.0
+FUNDING_MIN = 0.0
+VOLUME_24H_MIN = 5_000_000
+
+CHECK_INTERVAL = 14400  # 4 часа в секундах
+# =================================
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -46,13 +47,13 @@ def get_low_volume_coins():
                 coins.append(sym)
                 if len(coins) >= MAX_COINS:
                     break
+        print(f"Загружено {len(coins)} низколиквидных монет")
         return coins
     except Exception as e:
         print(f"Ошибка: {e}")
         return []
 
 def get_klines(symbol, interval='5m', limit=100):
-    # Bybit
     interval_map = {'5m': '5', '15m': '15', '1h': '60', '4h': '240'}
     url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}USDT&interval={interval_map.get(interval, '5')}&limit={limit}"
     try:
@@ -65,9 +66,8 @@ def get_klines(symbol, interval='5m', limit=100):
             return closes
     except:
         pass
-    # Binance
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
         r = requests.get(url, timeout=8)
         data = r.json()
         if isinstance(data, list) and len(data) > 0:
@@ -114,8 +114,15 @@ def get_funding(symbol):
     except:
         return None
 
+def get_realtime_price(symbol):
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+    try:
+        r = requests.get(url, timeout=5)
+        return float(r.json()['price'])
+    except:
+        return None
+
 def analyze_coin(symbol):
-    # RSI
     rsis = {}
     for tf in TIMEFRAMES_RSI:
         closes = get_klines(symbol, tf, 50)
@@ -125,7 +132,6 @@ def analyze_coin(symbol):
         if rsis[tf] is None:
             return None
 
-    # Изменения
     change_24h, volume_24h = get_24h_stats(symbol)
     if change_24h is None:
         return None
@@ -134,43 +140,41 @@ def analyze_coin(symbol):
     change_4h = get_price_change(symbol, '4h') or 0
     funding = get_funding(symbol)
 
-    # Условия (ослабленные)
     if (rsis['4h'] >= RSI_4H_MIN and rsis['1h'] >= RSI_1H_MIN and
-        change_4h >= CHANGE_4H_MIN and volume_24h >= VOLUME_24H_MIN):
-        # Фандинг не обязателен, но если есть положительный – хорошо
-        funding_ok = (funding is not None and funding >= 0) or funding is None
-        if funding_ok:
-            real_price = get_realtime_price(symbol)
-            if real_price is None:
-                return None
-            reasons = []
-            reasons.append(f"RSI 4h = {rsis['4h']} (>{RSI_4H_MIN})")
-            reasons.append(f"RSI 1h = {rsis['1h']} (>{RSI_1H_MIN})")
-            reasons.append(f"рост за 4ч = {change_4h:.2f}% (>{CHANGE_4H_MIN}%)")
-            if funding is not None:
-                reasons.append(f"фандинг = {funding:.2f}%")
-            explanation = " ".join(reasons)
-            msg = f"""
-🔻 SHORT СИГНАЛ {symbol} | {real_price:.4f}
+        change_4h >= CHANGE_4H_MIN and funding is not None and funding >= FUNDING_MIN and
+        volume_24h >= VOLUME_24H_MIN):
 
-RSI: 5m {rsis['5m']} | 15m {rsis['15m']} | 1h {rsis['1h']} | 4h {rsis['4h']}
-Изменение: 24h {change_24h:+.2f}% | 15m {change_15m:+.2f}% | 1h {change_1h:+.2f}% | 4h {change_4h:+.2f}%
-Объём 24h: {volume_24h/1e6:.2f}M
-Фандинг: {funding:+.4f}% ✅
+        reasons = []
+        if rsis['4h'] >= RSI_4H_MIN:
+            reasons.append(f"RSI 4h = {rsis['4h']} (выше {RSI_4H_MIN}) – сильная перекупленность")
+        if rsis['1h'] >= RSI_1H_MIN:
+            reasons.append(f"RSI 1h = {rsis['1h']} (выше {RSI_1H_MIN}) – подтверждение перекупленности")
+        if change_4h >= CHANGE_4H_MIN:
+            reasons.append(f"рост за 4ч = {change_4h:.2f}% (выше {CHANGE_4H_MIN}%) – импульс исчерпан")
+        if funding >= FUNDING_MIN:
+            reasons.append(f"фандинг = {funding:.2f}% – лонгисты платят шортистам")
+        if volume_24h >= VOLUME_24H_MIN:
+            reasons.append(f"объём 24ч = {volume_24h/1e6:.2f}M USDT – достаточно ликвидности")
+        explanation = " ".join(reasons)
 
-💡 {explanation}. Совокупность факторов указывает на возможную коррекцию вниз.
+        real_price = get_realtime_price(symbol)
+        if real_price is None:
+            return None
+
+        msg = f"""
+🔻 <b>SHORT СИГНАЛ</b> <b>{symbol}</b> | {real_price:.4f}
+
+<b>RSI:</b> 5m {rsis['5m']} | 15m {rsis['15m']} | 1h {rsis['1h']} | 4h {rsis['4h']}
+<b>Изменение:</b> 24h {change_24h:+.2f}% | 15m {change_15m:+.2f}% | 1h {change_1h:+.2f}% | 4h {change_4h:+.2f}%
+<b>Объём 24h:</b> {volume_24h/1e6:.2f}M
+<b>Фандинг:</b> {funding:+.4f}% ✅
+
+💡 <b>Логическое обоснование:</b> {explanation}. Совокупность факторов указывает на высокую вероятность коррекции вниз.
+
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-            return msg
+        return msg
     return None
-
-def get_realtime_price(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
-    try:
-        r = requests.get(url, timeout=5)
-        return float(r.json()['price'])
-    except:
-        return None
 
 def scan_market():
     print(f"[{datetime.now()}] Анализ низколиквидных монет...")
@@ -179,51 +183,25 @@ def scan_market():
         send_telegram("⚠️ Не удалось получить список монет")
         return
     signals = []
-    near_misses = []  # монеты, близкие к сигналу (для диагностики)
     for idx, symbol in enumerate(coins):
         try:
-            # Получаем данные для диагностики
-            rsis = {}
-            for tf in TIMEFRAMES_RSI:
-                closes = get_klines(symbol, tf, 50)
-                if not closes:
-                    break
-                rsis[tf] = calculate_rsi(closes)
-            if not rsis:
-                continue
-            change_4h = get_price_change(symbol, '4h') or 0
-            volume_24h = get_24h_stats(symbol)[1] or 0
-            # Если RSI 4h > 40 и change_4h > 0.5, считаем "почти сигнал"
-            if rsis.get('4h', 0) > 40 and change_4h > 0.5:
-                near_misses.append((symbol, rsis['4h'], change_4h))
-            # Полноценный анализ
             msg = analyze_coin(symbol)
             if msg:
                 signals.append(msg)
+                print(f"✅ Сигнал для {symbol}")
         except Exception as e:
             print(f"Ошибка {symbol}: {e}")
         time.sleep(0.2)
         if idx % 50 == 0:
             print(f"Обработано {idx}/{len(coins)} монет")
-    # Отправляем сигналы
     for msg in signals:
         send_telegram(msg)
         time.sleep(2)
-    # Диагностика: отправляем топ-3 монеты, близкие к сигналу (если сигналов нет)
-    if not signals and near_misses:
-        near_misses.sort(key=lambda x: x[1], reverse=True)
-        diag_msg = "🔍 Близкие к сигналу (RSI 4h, рост 4ч):\n"
-        for sym, r4, ch4 in near_misses[:3]:
-            diag_msg += f"{sym}: RSI4={r4:.1f}, рост4ч={ch4:.1f}%\n"
-        send_telegram(diag_msg)
     print(f"Готово. Сигналов: {len(signals)}")
 
 if __name__ == "__main__":
-    # Первый запуск сразу
+    # Бесконечный цикл с задержкой вместо schedule
     scan_market()
-    # Запуск по расписанию (каждые 4 часа)
-    schedule.every(4).hours.do(scan_market)
-    print("Бот запущен. Анализ каждые 4 часа.")
     while True:
-        schedule.run_pending()
-        time.sleep(60)
+        time.sleep(CHECK_INTERVAL)
+        scan_market()
