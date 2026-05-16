@@ -21,8 +21,8 @@ def get_klines(symbol, interval='1h', limit=2):
         data = r.json()
         if isinstance(data, list) and len(data) > 0:
             return [float(c[4]) for c in data]
-    except:
-        pass
+    except Exception as e:
+        print(f"  Ошибка свечей {symbol}: {e}")
     return []
 
 def get_price_change(symbol, interval='4h'):
@@ -36,14 +36,17 @@ def get_realtime_price(symbol):
     try:
         r = requests.get(url, timeout=5)
         return float(r.json()['price'])
-    except:
+    except Exception as e:
+        print(f"  Ошибка цены {symbol}: {e}")
         return None
 
 def analyze_coin(symbol):
     change = get_price_change(symbol, '4h')
     if change is None:
+        print(f"  {symbol}: изменение за 4ч не получено")
         return None
-    if change > 1.0:   # рост > 1% за 4 часа
+    print(f"  {symbol}: изменение за 4ч = {change:.2f}%")
+    if change > 1.0:
         price = get_realtime_price(symbol)
         if price is None:
             return None
@@ -57,7 +60,7 @@ def scan():
             sig = analyze_coin(sym)
             if sig:
                 send_telegram(sig)
-                print(f"✅ {sym}")
+                print(f"✅ СИГНАЛ {sym}")
                 time.sleep(2)
         except Exception as e:
             print(f"Ошибка {sym}: {e}")
@@ -65,7 +68,7 @@ def scan():
     print("Цикл завершён, жду 1 час.")
 
 if __name__ == "__main__":
-    send_telegram("🚀 ТЕСТОВЫЙ бот (SHORT по росту > 1% за 4ч) запущен.")
+    send_telegram("🚀 Диагностический бот запущен.")
     while True:
         scan()
         time.sleep(3600)
