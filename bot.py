@@ -7,18 +7,21 @@ from datetime import datetime
 TELEGRAM_TOKEN = "8695713035:AAELPJ25J5SMbw2Ed6rEW1fiuAtRZ4L9Abc"
 CHAT_ID = "694614387"
 
+# Настройки отбора монет
 MAX_COINS = 500
-MAX_24H_VOLUME_USDT = 200_000
+MAX_24H_VOLUME_USDT = 200_000           # низколиквидные: объём меньше 200k
 MIN_24H_VOLUME_USDT = 0
-TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
 
+# Интервал проверки (секунды)
+CHECK_INTERVAL = 3600                   # 1 час
+
+# Пороги для SHORT сигнала (ослаблены для теста)
+TIMEFRAMES_RSI = ['5m', '15m', '1h', '4h']
 RSI_4H_MIN = 65
 RSI_1H_MIN = 65
 CHANGE_4H_MIN = 2.0
 FUNDING_MIN = 0.0
 VOLUME_24H_MIN = 5_000_000
-
-CHECK_INTERVAL = 14400  # 4 часа в секундах
 # =================================
 
 def send_telegram(text):
@@ -28,6 +31,7 @@ def send_telegram(text):
     except:
         pass
 
+# ---------- ПОЛУЧЕНИЕ НИЗКОЛИКВИДНЫХ МОНЕТ (Binance) ----------
 def get_low_volume_coins():
     try:
         url = "https://api.binance.com/api/v3/ticker/24hr"
@@ -36,6 +40,7 @@ def get_low_volume_coins():
         if not isinstance(data, list):
             return []
         usdt_pairs = [p for p in data if p['symbol'].endswith('USDT')]
+        # Сортируем по объёму (от меньшего к большему)
         usdt_pairs.sort(key=lambda x: float(x['quoteVolume']))
         coins = []
         for pair in usdt_pairs:
@@ -50,11 +55,15 @@ def get_low_volume_coins():
         print(f"Загружено {len(coins)} низколиквидных монет")
         return coins
     except Exception as e:
-        print(f"Ошибка: {e}")
-        return []
+        print(f"Ошибка Binance: {e}")
+        # Резервный список (первые 100 известных монет)
+        fallback = ["SOL","XRP","ADA","DOGE","MATIC","DOT","AVAX","LINK","LTC","NEAR","ATOM","FIL","ALGO","VET","ICP","EGLD","THETA","FTM","SAND","MANA","AXS","ENJ","ZIL","KLAY","CHZ","ONE","ICX","XTZ","AAVE","BCH","EOS","TRX","XLM","ZEC","DASH","NEO","ONT","QTUM","WAVES","KSM","RUNE","PEPE","WIF","BONK","FLOKI","NOT","TON","OP","ARB","SUI","APT","INJ","SEI","TIA","PYTH","JUP","ONDO","STRK","ENA","ETHFI"]
+        return fallback[:MAX_COINS]
 
+# ---------- ПОЛУЧЕНИЕ СВЕЧЕЙ (Bybit + fallback) ----------
 def get_klines(symbol, interval='5m', limit=100):
     interval_map = {'5m': '5', '15m': '15', '1h': '60', '4h': '240'}
+    # Bybit
     url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}USDT&interval={interval_map.get(interval, '5')}&limit={limit}"
     try:
         r = requests.get(url, timeout=8)
@@ -66,8 +75,9 @@ def get_klines(symbol, interval='5m', limit=100):
             return closes
     except:
         pass
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
+    # Binance fallback
     try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit={limit}"
         r = requests.get(url, timeout=8)
         data = r.json()
         if isinstance(data, list) and len(data) > 0:
@@ -123,6 +133,7 @@ def get_realtime_price(symbol):
         return None
 
 def analyze_coin(symbol):
+    # RSI
     rsis = {}
     for tf in TIMEFRAMES_RSI:
         closes = get_klines(symbol, tf, 50)
@@ -132,6 +143,7 @@ def analyze_coin(symbol):
         if rsis[tf] is None:
             return None
 
+    # Изменения
     change_24h, volume_24h = get_24h_stats(symbol)
     if change_24h is None:
         return None
@@ -140,10 +152,11 @@ def analyze_coin(symbol):
     change_4h = get_price_change(symbol, '4h') or 0
     funding = get_funding(symbol)
 
+    # Условия
     if (rsis['4h'] >= RSI_4H_MIN and rsis['1h'] >= RSI_1H_MIN and
         change_4h >= CHANGE_4H_MIN and funding is not None and funding >= FUNDING_MIN and
         volume_24h >= VOLUME_24H_MIN):
-
+        
         reasons = []
         if rsis['4h'] >= RSI_4H_MIN:
             reasons.append(f"RSI 4h = {rsis['4h']} (выше {RSI_4H_MIN}) – сильная перекупленность")
@@ -177,7 +190,7 @@ def analyze_coin(symbol):
     return None
 
 def scan_market():
-    print(f"[{datetime.now()}] Анализ низколиквидных монет...")
+    print(f"[{datetime.now()}] Начинаю анализ низколиквидных монет...")
     coins = get_low_volume_coins()
     if not coins:
         send_telegram("⚠️ Не удалось получить список монет")
@@ -191,7 +204,7 @@ def scan_market():
                 print(f"✅ Сигнал для {symbol}")
         except Exception as e:
             print(f"Ошибка {symbol}: {e}")
-        time.sleep(0.2)
+        time.sleep(0.2)  # пауза между запросами
         if idx % 50 == 0:
             print(f"Обработано {idx}/{len(coins)} монет")
     for msg in signals:
@@ -199,9 +212,10 @@ def scan_market():
         time.sleep(2)
     print(f"Готово. Сигналов: {len(signals)}")
 
+# ---------- ОСНОВНОЙ ЦИКЛ (бесконечный, без schedule) ----------
 if __name__ == "__main__":
-    # Бесконечный цикл с задержкой вместо schedule
-    scan_market()
+    send_telegram("🚀 Бот (низколиквидные монеты) запущен. Анализ раз в час.")
     while True:
-        time.sleep(CHECK_INTERVAL)
         scan_market()
+        print(f"Жду {CHECK_INTERVAL} секунд до следующего цикла...")
+        time.sleep(CHECK_INTERVAL)
